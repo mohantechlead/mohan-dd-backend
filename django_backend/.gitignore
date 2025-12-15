@@ -1,0 +1,9 @@
+env.dev
+./migrations
+__pycache__/
+*.pyc
+
+env
+.env
+entrypoint.sh
+
