@@ -1,3 +1,4 @@
+python==3.12.2
 asgiref==3.10.0
 Django==5.2.8
 sqlparse==0.5.3
@@ -16,4 +17,4 @@ django-ninja-extra==0.30.2
 django-ninja-jwt==5.4.0
 django-ninja-simple-jwt==0.6.1
 django-cors-headers==4.3.1
-python==3.12.2
+
