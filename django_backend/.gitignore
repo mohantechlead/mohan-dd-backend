@@ -6,4 +6,5 @@ __pycache__/
 env
 .env
 entrypoint.sh
+settings.py
 
