@@ -12,7 +12,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = "django-insecure-change-this-in-production"
 
-DEBUG = True
+DEBUG = False
 
 ALLOWED_HOSTS = [
     "localhost",
@@ -60,7 +60,11 @@ AUTH_USER_MODEL = "accounts.User"
 CORS_ALLOWED_ORIGINS = [
     "http://127.0.0.1:3000",
     "http://localhost:3000",
-     ".herokuapp.com",
+     "https://mohan-dd-frontend-1ef4128343ba.herokuapp.com",
+]
+
+CSRF_TRUSTED_ORIGINS = [
+    "https://mohan-dd-frontend-1ef4128343ba.herokuapp.com",
 ]
 
 # ==============================
