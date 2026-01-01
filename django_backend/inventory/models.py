@@ -15,6 +15,9 @@ class GRN(models.Model):
 
     def __str__(self):
         return f"{self.grn_no} ({self.supplier_name})"
+    
+    class Meta:
+        ordering = ['grn_no'] 
 
 class GrnItems(models.Model):
     item_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
@@ -27,6 +30,9 @@ class GrnItems(models.Model):
 
     def __str__(self):
         return f"{self.grn} - {self.item_name} "
+    
+    class Meta:
+        ordering = ['grn'] 
 
 class DN(models.Model):
     id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True, primary_key=True)
