@@ -111,7 +111,7 @@ def create_dn(request, payload: DnCreateSchema):
 @router.get("/dn", response=List[DnDetailSchema])
 def list_DN(request):
     try:
-        dns = DN.objects.prefetch_related("items").all()
+        dns = DN.objects.prefetch_related("dn_items").all()
         result = []
         for dn in dns:
             result.append(
