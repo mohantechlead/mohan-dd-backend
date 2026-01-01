@@ -7,6 +7,8 @@ from .schemas import DnCreateSchema, DnDetailSchema, DnItemSchema
 from .schemas import ItemCreateSchema, ItemSchema, StockSchema
 from .models import Items, Stock
 import uuid
+from django.http import JsonResponse
+import traceback
 
 router = Router()
 
@@ -108,8 +110,32 @@ def create_dn(request, payload: DnCreateSchema):
 
 @router.get("/dn", response=List[DnDetailSchema])
 def list_DN(request):
-    qs = DN.objects.all()
-    return qs
+    try:
+        dns = DN.objects.prefetch_related("items").all()
+        result = []
+        for dn in dns:
+            result.append(
+                DnDetailSchema(
+                    customer_name=dn.customer_name,
+                    dn_no=dn.dn_no,
+                    sales_no=dn.sales_no,
+                    items=[
+                        DnItemSchema(
+                            item_name=item.item_name,
+                            quantity=item.quantity
+                        )
+                        for item in dn.items.all()
+                    ]
+                )
+            )
+        return result
+    except Exception as e:
+        print("DN endpoint error:", e)
+        traceback.print_exc()
+        return JsonResponse(
+            {"message": "DN endpoint failed", "error": str(e)},
+            status=500
+        )
 
 @router.post("/items", response=ItemCreateSchema)
 def create_item(request, payload: ItemCreateSchema):

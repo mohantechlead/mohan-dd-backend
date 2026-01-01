@@ -1,5 +1,5 @@
 from ninja import Schema
-from typing import List
+from typing import List, Optional
 import uuid
 from datetime import date
 
@@ -93,7 +93,7 @@ class DnDetailSchema(Schema):
     customer_name: str
     dn_no: str
     sales_no: str
-    items: List[DnItemSchema]
+    items: Optional[List[DnItemSchema]] = []
 
 class ItemCreateSchema(Schema):
     item_name: str
