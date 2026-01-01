@@ -124,7 +124,7 @@ def list_DN(request):
                             item_name=item.item_name,
                             quantity=item.quantity
                         )
-                        for item in dn.items.all()
+                        for item in dn.dn_items.all()
                     ]
                 )
             )
