@@ -1,3 +1,4 @@
+import dj_database_url
 import datetime
 from pathlib import Path
 from datetime import timedelta
@@ -11,7 +12,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 SECRET_KEY = "django-insecure-change-this-in-production"
 
-DEBUG = True
+DEBUG = False
 
 ALLOWED_HOSTS = [
     "localhost",
@@ -59,6 +60,11 @@ AUTH_USER_MODEL = "accounts.User"
 CORS_ALLOWED_ORIGINS = [
     "http://127.0.0.1:3000",
     "http://localhost:3000",
+     "https://mohan-dd-frontend-1ef4128343ba.herokuapp.com",
+]
+
+CSRF_TRUSTED_ORIGINS = [
+    "https://mohan-dd-frontend-1ef4128343ba.herokuapp.com",
 ]
 
 # ==============================
@@ -127,14 +133,9 @@ WSGI_APPLICATION = "django_backend.wsgi.application"
 # ==============================
 
 DATABASES = {
-    "default": {
-        "ENGINE": "django.db.backends.postgresql",
-        "NAME": "db",
-        "USER": "postgres",
-        "PASSWORD": "mohanPLC",
-        "HOST": "localhost",
-        "PORT": "5432",
-    }
+    "default": dj_database_url.config(
+        default=os.environ.get("DATABASE_URL")
+    )
 }
 
 # ==============================
