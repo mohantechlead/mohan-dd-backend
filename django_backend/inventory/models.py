@@ -5,7 +5,7 @@ import uuid
 class GRN(models.Model):
     id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True, primary_key=True)
     supplier_name = models.CharField(max_length=255)
-    grn_no = models.CharField(max_length=255)
+    grn_no = models.IntegerField(unique=True)
     plate_no = models.CharField(max_length=255)
     purchase_no = models.CharField(max_length=255)
     date = models.DateField(null=False, blank=False, auto_now = True)
