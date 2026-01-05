@@ -63,7 +63,6 @@ def list_GRN(request):
                 GrnDetailSchema(
                     supplier_name=grn.supplier_name,
                     grn_no=grn.grn_no,
-                    plate_no=grn.plate_no,
                     purchase_no=grn.purchase_no,
                     items=[
                         GrnItemSchema(
