@@ -94,9 +94,7 @@ class ItemSchema(Schema):
     
 class StockSchema(Schema):
     item_name: str
-    hscode: Optional[str]
     internal_code: Optional[str]
     quantity: Optional[float]
-    unit_measurement: Optional[str]
     package: Optional[float]
  
