@@ -44,10 +44,7 @@ class GRNListSchema(Schema):
     purchase_no: str
     items: List[GrnItemSchema]
 
-
-
 # DN Schemas
-
 class DnItemCreateSchema(Schema):
     item_name: str
     quantity: int
@@ -67,7 +64,6 @@ class DnCreateSchema(Schema):
     gatepass_no: str
     despathcher_name: str
     receiver_name: str
-    receiver_phone: str
     authorized_by: str
     items: List[DnItemCreateSchema]
 

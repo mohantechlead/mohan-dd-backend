@@ -9,7 +9,6 @@ from .models import Items, Stock
 import uuid
 from django.http import JsonResponse
 import traceback
-from django.db.models import Sum
 
 router = Router()
 
@@ -106,7 +105,6 @@ def create_dn(request, payload: DnCreateSchema):
         gatepass_no = payload.gatepass_no,
         despathcher_name = payload.despathcher_name,
         receiver_name = payload.receiver_name,
-        receiver_phone = payload.receiver_phone,
         authorized_by = payload.authorized_by,
     )
 
@@ -119,7 +117,8 @@ def create_dn(request, payload: DnCreateSchema):
             item_name=item.item_name,
             quantity=item.quantity,
             unit_measurement=item.unit_measurement,
-            internal_code = item.internal_code
+            internal_code = item.internal_code,
+            bags = item.bags
         )
         created_items.append(new_item)
 
@@ -186,50 +185,45 @@ def display_item(request):
     items = Items.objects.all()
     return items
 
-
-@router.get("/stock", response=List[StockSchema])
+@router.get("/stock", response=list[StockSchema])
 def display_stock(request):
-    # Aggregate GRN quantities
-    grn_data = (
-        GrnItems.objects
-        .values("internal_code")
-        .annotate(
-            total_quantity=Sum("quantity"),
-            total_bags=Sum("bags"),
-        )
-    )
-
-    # Aggregate DN quantities
-    dn_data = (
-        DNItems.objects
-        .values("internal_code")
-        .annotate(
-            total_quantity=Sum("quantity"),
-            total_bags=Sum("bags"),
-        )
-    )
-
-    grn_map = {g["internal_code"]: g for g in grn_data}
-    dn_map = {d["internal_code"]: d for d in dn_data}
+    grns = GrnItems.objects.all()
+    dns = DNItems.objects.all()
+    items = Items.objects.all()
 
     stock_list = []
 
-    for item in Items.objects.all():
-        grn = grn_map.get(item.internal_code, {})
-        dn = dn_map.get(item.internal_code, {})
+    for item in items:
+        # matching GRN and DN for this item
+        grn = grns.filter(internal_code=item.internal_code).first()
+        dn = dns.filter(internal_code=item.internal_code).first()
 
-        grn_qty = grn.get("total_quantity") or 0
-        dn_qty = dn.get("total_quantity") or 0
+        stock_quantity = 0
+        stock_bags = 0
+        item_name = item.item_name
 
-        grn_bags = grn.get("total_bags") or 0
-        dn_bags = dn.get("total_bags") or 0
+        if grn and dn:
+            stock_quantity = grn.quantity - dn.quantity
+            stock_bags = grn.bags - dn.bags
+
+        elif grn:
+            stock_quantity = grn.quantity
+            stock_bags = grn.bags
+
+        elif dn:
+            stock_quantity = -dn.quantity
+            stock_bags = -dn.bags
 
         stock_list.append({
-            "item_name": item.item_name,
-            "internal_code": item.internal_code,
+            "item_name": item_name,
+            "quantity": stock_quantity,
+            "package": stock_bags,
             "hscode": item.hscode,
-            "quantity": grn_qty - dn_qty,
-            "package": grn_bags - dn_bags,
+            "internal_code": item.internal_code,
+            "unit_measurement": grn.unit_measurement if grn else (dn.unit_measurement if dn else ""),
         })
 
     return stock_list
+  
+
+    
