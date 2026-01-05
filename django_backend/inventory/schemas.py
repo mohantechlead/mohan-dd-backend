@@ -40,7 +40,7 @@ class GrnDetailSchema(Schema):
 
 class GRNListSchema(Schema):
     supplier_name: str
-    grn_no: str
+    grn_no: int
     purchase_no: str
     items: List[GrnItemSchema]
 

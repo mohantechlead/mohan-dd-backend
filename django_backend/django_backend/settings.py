@@ -1,4 +1,3 @@
-import dj_database_url
 import datetime
 from pathlib import Path
 from datetime import timedelta
@@ -133,9 +132,14 @@ WSGI_APPLICATION = "django_backend.wsgi.application"
 # ==============================
 
 DATABASES = {
-    "default": dj_database_url.config(
-        default=os.environ.get("DATABASE_URL")
-    )
+    "default": {
+        "ENGINE": "django.db.backends.postgresql",
+        "NAME": "db",
+        "USER": "postgres",
+        "PASSWORD": "mohanPLC", 
+        "HOST": "localhost",
+        "PORT": "5432",
+    }
 }
 
 # ==============================
