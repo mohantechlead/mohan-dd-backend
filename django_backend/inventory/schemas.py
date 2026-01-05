@@ -26,7 +26,6 @@ class GrnCreateSchema(Schema):
 
 # Response schema
 class GrnItemSchema(Schema):
-    item_id: uuid.UUID
     item_name: str
     quantity: int
     
