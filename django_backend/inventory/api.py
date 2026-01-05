@@ -55,8 +55,33 @@ def create_grn(request, payload: GrnCreateSchema):
 
 @router.get("/grn", response=List[GRNListSchema])
 def list_GRN(request):
-    qs = GRN.objects.all()
-    return qs
+    try:
+        grns = GRN.objects.prefetch_related("items").all()
+        result = []
+        for grn in grns:
+            result.append(
+                GrnDetailSchema(
+                    supplier_name=grn.supplier_name,
+                    grn_no=grn.grn_no,
+                    plate_no=grn.plate_no,
+                    purchase_no=grn.purchase_no,
+                    items=[
+                        GrnItemSchema(
+                            item_name=item.item_name,
+                            quantity=item.quantity
+                        )
+                        for item in grn.items.all()
+                    ]
+                )
+            )
+        return result
+    except Exception as e:
+        print("GRN endpoint error:", e)
+        traceback.print_exc()
+        return JsonResponse(
+            {"message": "GRN endpoint failed", "error": str(e)},
+            status=500
+        )
 
 @router.get("/grn/{grn_no}", response=GrnDetailSchema)
 def get_GRN(request, grn_no: str):
