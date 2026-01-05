@@ -60,7 +60,7 @@ def list_GRN(request):
         result = []
         for grn in grns:
             result.append(
-                GrnDetailSchema(
+                GRNListSchema(
                     supplier_name=grn.supplier_name,
                     grn_no=grn.grn_no,
                     purchase_no=grn.purchase_no,

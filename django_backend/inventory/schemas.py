@@ -30,19 +30,21 @@ class GrnItemSchema(Schema):
     quantity: int
     
 
-class GRNListSchema(Schema):
-    supplier_name: str
-    grn_no: str
-    purchase_no: str
-    items: List[GrnItemSchema]
-
-#double
-class GRNDetailSchema(Schema):
+class GrnDetailSchema(Schema):
+    id: uuid.UUID
     supplier_name: str
     grn_no: str
     plate_no: str
     purchase_no: str
-    items: Optional[List[GrnItemSchema]] = []
+    items: List[GrnItemSchema]
+
+class GRNListSchema(Schema):
+    supplier_name: str
+    grn_no: int
+    purchase_no: str
+    items: List[GrnItemSchema]
+
+
 
 # DN Schemas
 
