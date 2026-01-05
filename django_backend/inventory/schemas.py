@@ -51,7 +51,7 @@ class GRNDetailSchema(Schema):
     grn_no: str
     plate_no: str
     purchase_no: str
-    items: List[GrnItemSchema]
+    items: Optional[List[GrnItemSchema]] = []
 
 # DN Schemas
 
