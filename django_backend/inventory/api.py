@@ -9,6 +9,7 @@ from .models import Items, Stock
 import uuid
 from django.http import JsonResponse
 import traceback
+from django.db.models import Sum
 
 router = Router()
 
@@ -195,24 +196,32 @@ def display_stock(request):
 
     for item in items:
         # matching GRN and DN for this item
-        grn = grns.filter(internal_code=item.internal_code).first()
-        dn = dns.filter(internal_code=item.internal_code).first()
+        grn_totals = GrnItems.objects.filter(
+            internal_code=item.internal_code
+        ).aggregate(
+            quantity=Sum("quantity"),
+            bags=Sum("bags")
+        )
+
+        dn_totals = DNItems.objects.filter(
+            internal_code=item.internal_code
+        ).aggregate(
+            quantity=Sum("quantity"),
+            bags=Sum("bags")
+        )
+
+        grn_qty = grn_totals["quantity"] or 0
+        grn_bags = grn_totals["bags"] or 0
+
+        dn_qty = dn_totals["quantity"] or 0
+        dn_bags = dn_totals["bags"] or 0
 
         stock_quantity = 0
         stock_bags = 0
         item_name = item.item_name
 
-        if grn and dn:
-            stock_quantity = grn.quantity - dn.quantity
-            stock_bags = grn.bags - dn.bags
-
-        elif grn:
-            stock_quantity = grn.quantity
-            stock_bags = grn.bags
-
-        elif dn:
-            stock_quantity = -dn.quantity
-            stock_bags = -dn.bags
+        stock_quantity = grn_qty - dn_qty
+        stock_bags = grn_bags - dn_bags
 
         stock_list.append({
             "item_name": item_name,
@@ -220,7 +229,6 @@ def display_stock(request):
             "package": stock_bags,
             "hscode": item.hscode,
             "internal_code": item.internal_code,
-            "unit_measurement": grn.unit_measurement if grn else (dn.unit_measurement if dn else ""),
         })
 
     return stock_list
