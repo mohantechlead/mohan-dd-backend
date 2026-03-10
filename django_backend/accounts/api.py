@@ -1,17 +1,26 @@
 from typing import List
 from ninja import Router, Schema
 import uuid
+from django.contrib.auth import get_user_model
 from .models import Partner
 from .schemas import CustomerListSchema,CustomerCreateSchema, CustomerDetailSchema
 from .schemas import SupplierListSchema,SupplierCreateSchema, SupplierDetailSchema
 from django.shortcuts import get_object_or_404
+
 router = Router()
 
+User = get_user_model()
+
 class UserSchema(Schema):
+    id: int
     username: str
-    is_authenticated: bool
-    # is not requst.user.is_authenticated
-    email: str = None
+    email: str | None = None
+
+@router.get("/users", response=List[UserSchema])
+def list_users(request):
+    qs = User.objects.all()
+    return qs
+
 
 @router.get("/customer", response=List[CustomerListSchema])
 def list_customers(request):

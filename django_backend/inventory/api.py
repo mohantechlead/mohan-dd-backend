@@ -1,11 +1,43 @@
 from ninja import Router
-from typing import List
+from typing import List, Optional
 from django.shortcuts import get_object_or_404
-from .models import GRN, GrnItems, DN, DNItems
-from .schemas import GrnCreateSchema, GrnDetailSchema, GRNListSchema, GrnItemSchema
-from .schemas import DnCreateSchema, DnDetailSchema, DnItemSchema
-from .schemas import ItemCreateSchema, ItemSchema, StockSchema
-from .models import Items, Stock
+from .models import (
+    GRN,
+    GrnItems,
+    DN,
+    DNItems,
+    Items,
+    Stock,
+    Order,
+    OrderItem,
+    Purchase,
+    PurchaseItem,
+    ShippingInvoice,
+    ShippingInvoiceItem,
+)
+from .schemas import (
+    GrnCreateSchema,
+    GrnDetailSchema,
+    GRNListSchema,
+    GrnItemSchema,
+    DnCreateSchema,
+    DnDetailSchema,
+    DnItemSchema,
+    ItemCreateSchema,
+    ItemSchema,
+    StockSchema,
+    OrderCreateSchema,
+    OrderDetailSchema,
+    OrderItemSchema,
+    OrderApproveSchema,
+    PurchaseCreateSchema,
+    PurchaseDetailSchema,
+    PurchaseItemSchema,
+    ShippingInvoiceCreateSchema,
+    ShippingInvoiceSummarySchema,
+    ShippingInvoiceDetailSchema,
+    ShippingInvoiceItemSchema,
+)
 import uuid
 from django.http import JsonResponse
 import traceback
@@ -232,6 +264,415 @@ def display_stock(request):
         })
 
     return stock_list
-  
+
+
+@router.post("/orders", response=OrderDetailSchema)
+def create_order(request, payload: OrderCreateSchema):
+    # Prevent duplicate order numbers
+    if Order.objects.filter(order_number=payload.order_number).exists():
+        return JsonResponse(
+            {"detail": "Order number already exists."},
+            status=400,
+        )
+
+    order = Order.objects.create(
+        id=uuid.uuid4(),
+        order_number=payload.order_number,
+        proforma_ref_no=payload.proforma_ref_no,
+        buyer=payload.buyer,
+        add_consignee=payload.add_consignee,
+        order_date=payload.order_date,
+        shipper=payload.shipper,
+        notify_party=payload.notify_party,
+        add_notify_party=payload.add_notify_party,
+        country_of_origin=payload.country_of_origin,
+        final_destination=payload.final_destination,
+        port_of_loading=payload.port_of_loading,
+        port_of_discharge=payload.port_of_discharge,
+        measurement_type=payload.measurement_type,
+        payment_terms=payload.payment_terms,
+        mode_of_transport=payload.mode_of_transport,
+        freight=payload.freight,
+        freight_price=payload.freight_price,
+        shipment_type=payload.shipment_type,
+    )
+
+    created_items: list[OrderItem] = []
+    for item in payload.items:
+        new_item = OrderItem.objects.create(
+            item_id=uuid.uuid4(),
+            order=order,
+            item_name=item.item_name,
+            hs_code=item.hs_code,
+            price=item.price,
+            quantity=item.quantity,
+            total_price=item.total_price,
+            measurement=item.measurement,
+        )
+        created_items.append(new_item)
+
+    return {
+        "id": order.id,
+        "order_number": order.order_number,
+        "order_date": order.order_date,
+        "buyer": order.buyer,
+        "proforma_ref_no": order.proforma_ref_no,
+        "add_consignee": order.add_consignee,
+        "shipper": order.shipper,
+        "notify_party": order.notify_party,
+        "add_notify_party": order.add_notify_party,
+        "country_of_origin": order.country_of_origin,
+        "final_destination": order.final_destination,
+        "port_of_loading": order.port_of_loading,
+        "port_of_discharge": order.port_of_discharge,
+        "measurement_type": order.measurement_type,
+        "payment_terms": order.payment_terms,
+        "mode_of_transport": order.mode_of_transport,
+        "freight": order.freight,
+        "freight_price": float(order.freight_price) if order.freight_price is not None else None,
+        "shipment_type": order.shipment_type,
+        "status": order.status,
+        "approved_by": order.approved_by.username if order.approved_by else None,
+        "items": [
+            OrderItemSchema(
+                item_name=i.item_name,
+                hs_code=i.hs_code,
+                price=float(i.price),
+                quantity=i.quantity,
+                total_price=float(i.total_price),
+                measurement=i.measurement,
+            )
+            for i in created_items
+        ],
+    }
+
+
+@router.get("/orders", response=List[OrderDetailSchema])
+def list_orders(request):
+    orders = Order.objects.prefetch_related("items").all()
+    result: list[OrderDetailSchema] = []
+    for o in orders:
+        result.append(
+            OrderDetailSchema(
+                id=o.id,
+                order_number=o.order_number,
+                order_date=o.order_date,
+                buyer=o.buyer,
+                proforma_ref_no=o.proforma_ref_no,
+                add_consignee=o.add_consignee,
+                shipper=o.shipper,
+                notify_party=o.notify_party,
+                add_notify_party=o.add_notify_party,
+                country_of_origin=o.country_of_origin,
+                final_destination=o.final_destination,
+                port_of_loading=o.port_of_loading,
+                port_of_discharge=o.port_of_discharge,
+                measurement_type=o.measurement_type,
+                payment_terms=o.payment_terms,
+                mode_of_transport=o.mode_of_transport,
+                freight=o.freight,
+                freight_price=float(o.freight_price) if o.freight_price is not None else None,
+                shipment_type=o.shipment_type,
+                status=o.status,
+                approved_by=o.approved_by.username if o.approved_by else None,
+                items=[
+                    OrderItemSchema(
+                        item_name=i.item_name,
+                        hs_code=i.hs_code,
+                        price=float(i.price),
+                        quantity=i.quantity,
+                        total_price=float(i.total_price),
+                        measurement=i.measurement,
+                    )
+                    for i in o.items.all()
+                ],
+            )
+        )
+    return result
+
+
+@router.get("/orders/{order_number}", response=OrderDetailSchema)
+def get_order_detail(request, order_number: str):
+    order = get_object_or_404(
+        Order.objects.prefetch_related("items"),
+        order_number__iexact=order_number.strip(),
+    )
+    return OrderDetailSchema(
+        id=order.id,
+        order_number=order.order_number,
+        order_date=order.order_date,
+        buyer=order.buyer,
+        proforma_ref_no=order.proforma_ref_no,
+        add_consignee=order.add_consignee,
+        shipper=order.shipper,
+        notify_party=order.notify_party,
+        add_notify_party=order.add_notify_party,
+        country_of_origin=order.country_of_origin,
+        final_destination=order.final_destination,
+        port_of_loading=order.port_of_loading,
+        port_of_discharge=order.port_of_discharge,
+        measurement_type=order.measurement_type,
+        payment_terms=order.payment_terms,
+        mode_of_transport=order.mode_of_transport,
+        freight=order.freight,
+        freight_price=float(order.freight_price) if order.freight_price is not None else None,
+        shipment_type=order.shipment_type,
+        status=order.status,
+        approved_by=order.approved_by.username if order.approved_by else None,
+        items=[
+            OrderItemSchema(
+                item_name=i.item_name,
+                hs_code=i.hs_code,
+                price=float(i.price),
+                quantity=i.quantity,
+                total_price=float(i.total_price),
+                measurement=i.measurement,
+            )
+            for i in order.items.all()
+        ],
+    )
+
+@router.post("/orders/{order_number}/approve", response=OrderDetailSchema)
+def approve_order(request, order_number: str, payload: OrderApproveSchema):
+    # Use case-insensitive, trimmed lookup to be robust against formatting differences
+    order = get_object_or_404(Order, order_number__iexact=order_number.strip())
+    order.status = "approved"
+    order.approved_by_id = payload.approved_by_id
+    order.save()
+
+    return OrderDetailSchema(
+        id=order.id,
+        order_number=order.order_number,
+        order_date=order.order_date,
+        buyer=order.buyer,
+        proforma_ref_no=order.proforma_ref_no,
+        add_consignee=order.add_consignee,
+        shipper=order.shipper,
+        notify_party=order.notify_party,
+        add_notify_party=order.add_notify_party,
+        country_of_origin=order.country_of_origin,
+        final_destination=order.final_destination,
+        port_of_loading=order.port_of_loading,
+        port_of_discharge=order.port_of_discharge,
+        measurement_type=order.measurement_type,
+        payment_terms=order.payment_terms,
+        mode_of_transport=order.mode_of_transport,
+        freight=order.freight,
+        freight_price=float(order.freight_price) if order.freight_price is not None else None,
+        shipment_type=order.shipment_type,
+        status=order.status,
+        approved_by=order.approved_by.username if order.approved_by else None,
+        items=[
+            OrderItemSchema(
+                item_name=i.item_name,
+                hs_code=i.hs_code,
+                price=float(i.price),
+                quantity=i.quantity,
+                total_price=float(i.total_price),
+                measurement=i.measurement,
+            )
+            for i in order.items.all()
+        ],
+    )
+
+
+@router.post("/purchases", response=PurchaseDetailSchema)
+def create_purchase(request, payload: PurchaseCreateSchema):
+    # Prevent duplicate purchase numbers
+    if Purchase.objects.filter(purchase_number=payload.purchase_number).exists():
+        return JsonResponse(
+            {"detail": "Purchase number already exists."},
+            status=400,
+        )
+
+    purchase = Purchase.objects.create(
+        id=uuid.uuid4(),
+        purchase_number=payload.purchase_number,
+        proforma_ref_no=payload.proforma_ref_no,
+        buyer=payload.buyer,
+        add_consignee=payload.add_consignee,
+        order_date=payload.order_date,
+        shipper=payload.shipper,
+        notify_party=payload.notify_party,
+        add_notify_party=payload.add_notify_party,
+        country_of_origin=payload.country_of_origin,
+        final_destination=payload.final_destination,
+        conditions=payload.conditions,
+        port_of_loading=payload.port_of_loading,
+        port_of_discharge=payload.port_of_discharge,
+        measurement_type=payload.measurement_type,
+        payment_terms=payload.payment_terms,
+        mode_of_transport=payload.mode_of_transport,
+        freight=payload.freight,
+        freight_price=payload.freight_price,
+        insurance=payload.insurance,
+        shipment_type=payload.shipment_type,
+    )
+
+    created_items: list[PurchaseItem] = []
+    for item in payload.items:
+        new_item = PurchaseItem.objects.create(
+            item_id=uuid.uuid4(),
+            purchase=purchase,
+            item_name=item.item_name,
+            price=item.price,
+            quantity=item.quantity,
+            total_price=item.total_price,
+            measurement=item.measurement,
+        )
+        created_items.append(new_item)
+
+    return {
+        "id": purchase.id,
+        "purchase_number": purchase.purchase_number,
+        "order_date": purchase.order_date,
+        "buyer": purchase.buyer,
+        "proforma_ref_no": purchase.proforma_ref_no,
+        "status": purchase.status,
+        "items": [
+            PurchaseItemSchema(
+                item_name=i.item_name,
+                price=float(i.price),
+                quantity=i.quantity,
+                total_price=float(i.total_price),
+                measurement=i.measurement,
+            )
+            for i in created_items
+        ],
+    }
+
+
+@router.get("/purchases", response=List[PurchaseDetailSchema])
+def list_purchases(request):
+    purchases = Purchase.objects.prefetch_related("items").all()
+    result: list[PurchaseDetailSchema] = []
+    for p in purchases:
+        result.append(
+            PurchaseDetailSchema(
+                id=p.id,
+                purchase_number=p.purchase_number,
+                order_date=p.order_date,
+                buyer=p.buyer,
+                proforma_ref_no=p.proforma_ref_no,
+                status=p.status,
+                items=[
+                    PurchaseItemSchema(
+                        item_name=i.item_name,
+                        price=float(i.price),
+                        quantity=i.quantity,
+                        total_price=float(i.total_price),
+                        measurement=i.measurement,
+                    )
+                    for i in p.items.all()
+                ],
+            )
+        )
+    return result
+
+
+@router.post("/shipping-invoices", response=ShippingInvoiceSummarySchema)
+def create_shipping_invoice(request, payload: ShippingInvoiceCreateSchema):
+    # Prevent duplicate invoice numbers
+    if ShippingInvoice.objects.filter(invoice_number=payload.invoice_number).exists():
+        return JsonResponse(
+            {"detail": "Invoice number already exists."},
+            status=400,
+        )
+
+    # Find related order by unique order number
+    order = get_object_or_404(
+        Order, order_number__iexact=payload.order_number.strip()
+    )
+
+    invoice = ShippingInvoice.objects.create(
+        id=uuid.uuid4(),
+        order=order,
+        invoice_number=payload.invoice_number,
+        invoice_date=payload.invoice_date,
+        waybill_number=payload.waybill_number,
+        customer_order_number=payload.customer_order_number,
+        container_number=payload.container_number,
+        vessel=payload.vessel,
+        invoice_remark=payload.invoice_remark,
+        packing_list_remark=payload.packing_list_remark,
+        waybill_remark=payload.waybill_remark,
+        bill_of_lading_remark=payload.bill_of_lading_remark,
+    )
+
+    for item in payload.items:
+        ShippingInvoiceItem.objects.create(
+            id=uuid.uuid4(),
+            invoice=invoice,
+            item_name=item.item_name,
+            price=item.price,
+            quantity=item.quantity,
+            total_price=item.total_price,
+            measurement=item.measurement,
+            bags=item.bags,
+            net_weight=item.net_weight,
+            gross_weight=item.gross_weight,
+        )
+
+    return ShippingInvoiceSummarySchema(
+        id=invoice.id,
+        invoice_number=invoice.invoice_number,
+        order_number=invoice.order.order_number,
+        invoice_date=invoice.invoice_date,
+    )
+
+
+@router.get("/shipping-invoices", response=List[ShippingInvoiceSummarySchema])
+def list_shipping_invoices(request, order_number: Optional[str] = None):
+    invoices = ShippingInvoice.objects.select_related("order").all()
+    if order_number:
+        invoices = invoices.filter(
+            order__order_number__iexact=order_number.strip()
+        )
+
+    result: list[ShippingInvoiceSummarySchema] = []
+    for inv in invoices:
+        result.append(
+            ShippingInvoiceSummarySchema(
+                id=inv.id,
+                invoice_number=inv.invoice_number,
+                order_number=inv.order.order_number,
+                invoice_date=inv.invoice_date,
+            )
+        )
+    return result
+
+
+@router.get("/shipping-invoices/{invoice_id}", response=ShippingInvoiceDetailSchema)
+def get_shipping_invoice_detail(request, invoice_id: uuid.UUID):
+    invoice = get_object_or_404(
+        ShippingInvoice.objects.prefetch_related("items", "order"), id=invoice_id
+    )
+    return ShippingInvoiceDetailSchema(
+        id=invoice.id,
+        order_number=invoice.order.order_number,
+        invoice_number=invoice.invoice_number,
+        invoice_date=invoice.invoice_date,
+        waybill_number=invoice.waybill_number,
+        customer_order_number=invoice.customer_order_number,
+        container_number=invoice.container_number,
+        vessel=invoice.vessel,
+        invoice_remark=invoice.invoice_remark,
+        packing_list_remark=invoice.packing_list_remark,
+        waybill_remark=invoice.waybill_remark,
+        bill_of_lading_remark=invoice.bill_of_lading_remark,
+        items=[
+            ShippingInvoiceItemSchema(
+                item_name=i.item_name,
+                price=float(i.price),
+                quantity=i.quantity,
+                total_price=float(i.total_price),
+                measurement=i.measurement,
+                bags=i.bags,
+                net_weight=i.net_weight,
+                gross_weight=i.gross_weight,
+            )
+            for i in invoice.items.all()
+        ],
+    )
 
     
