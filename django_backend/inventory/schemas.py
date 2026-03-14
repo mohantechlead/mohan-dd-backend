@@ -157,11 +157,42 @@ class OrderDetailSchema(Schema):
     shipment_type: str
     status: str
     approved_by: Optional[str] = None
+    approval_date: Optional[str] = None
+    completed_by: Optional[str] = None
+    completed_date: Optional[str] = None
+    cancelled_by: Optional[str] = None
+    cancelled_date: Optional[str] = None
+    status_remark: Optional[str] = None
     items: List[OrderItemSchema]
 
 
+class OrderUpdateSchema(Schema):
+    proforma_ref_no: str
+    buyer: str
+    add_consignee: Optional[str]
+    order_date: date
+    shipper: str
+    notify_party: Optional[str]
+    add_notify_party: Optional[str]
+    country_of_origin: str
+    final_destination: str
+    port_of_loading: str
+    port_of_discharge: str
+    measurement_type: str
+    payment_terms: str
+    mode_of_transport: str
+    freight: str
+    freight_price: Optional[float]
+    shipment_type: str
+
 class OrderApproveSchema(Schema):
     approved_by_id: int
+
+
+class OrderStatusUpdateSchema(Schema):
+    status: str  # "completed" or "cancelled"
+    user_id: int  # completed_by_id or cancelled_by_id
+    remark: Optional[str] = None
 
 
 class PurchaseItemCreateSchema(Schema):
@@ -211,7 +242,63 @@ class PurchaseDetailSchema(Schema):
     buyer: str
     proforma_ref_no: str
     status: str
+    approved_by: Optional[str] = None
+    approval_date: Optional[str] = None
+    completed_by: Optional[str] = None
+    completed_date: Optional[str] = None
+    cancelled_by: Optional[str] = None
+    cancelled_date: Optional[str] = None
+    status_remark: Optional[str] = None
+    add_consignee: Optional[str] = None
+    shipper: Optional[str] = None
+    notify_party: Optional[str] = None
+    add_notify_party: Optional[str] = None
+    country_of_origin: Optional[str] = None
+    final_destination: Optional[str] = None
+    conditions: Optional[str] = None
+    port_of_loading: Optional[str] = None
+    port_of_discharge: Optional[str] = None
+    measurement_type: Optional[str] = None
+    payment_terms: Optional[str] = None
+    mode_of_transport: Optional[str] = None
+    freight: Optional[str] = None
+    freight_price: Optional[float] = None
+    insurance: Optional[str] = None
+    shipment_type: Optional[str] = None
     items: List[PurchaseItemSchema]
+
+
+class PurchaseApproveSchema(Schema):
+    approved_by_id: int
+
+
+class PurchaseStatusUpdateSchema(Schema):
+    status: str  # "completed" or "cancelled"
+    user_id: int
+    remark: Optional[str] = None
+
+
+class PurchaseUpdateSchema(Schema):
+    proforma_ref_no: str
+    buyer: str
+    add_consignee: Optional[str]
+    order_date: date
+    shipper: str
+    notify_party: Optional[str]
+    add_notify_party: Optional[str]
+    country_of_origin: str
+    final_destination: str
+    conditions: Optional[str]
+    port_of_loading: str
+    port_of_discharge: str
+    measurement_type: str
+    payment_terms: str
+    mode_of_transport: str
+    freight: str
+    freight_price: Optional[float]
+    insurance: Optional[str]
+    shipment_type: str
+    items: List[PurchaseItemCreateSchema]
 
 
 class ShippingInvoiceItemCreateSchema(Schema):
@@ -228,6 +315,19 @@ class ShippingInvoiceItemCreateSchema(Schema):
 class ShippingInvoiceCreateSchema(Schema):
     order_number: str
     invoice_number: str
+    invoice_date: date
+    waybill_number: Optional[str]
+    customer_order_number: str
+    container_number: Optional[str]
+    vessel: Optional[str]
+    invoice_remark: Optional[str]
+    packing_list_remark: Optional[str]
+    waybill_remark: Optional[str]
+    bill_of_lading_remark: Optional[str]
+    items: List[ShippingInvoiceItemCreateSchema]
+
+
+class ShippingInvoiceUpdateSchema(Schema):
     invoice_date: date
     waybill_number: Optional[str]
     customer_order_number: str

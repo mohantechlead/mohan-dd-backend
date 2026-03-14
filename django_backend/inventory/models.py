@@ -116,6 +116,24 @@ class Order(models.Model):
         on_delete=models.SET_NULL,
         related_name="approved_orders",
     )
+    approval_date = models.DateTimeField(null=True, blank=True)
+    completed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="completed_orders",
+    )
+    completed_date = models.DateTimeField(null=True, blank=True)
+    cancelled_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="cancelled_orders",
+    )
+    cancelled_date = models.DateTimeField(null=True, blank=True)
+    status_remark = models.TextField(blank=True, null=True)
 
     def __str__(self):
         return f"{self.order_number} ({self.buyer})"
@@ -198,6 +216,24 @@ class Purchase(models.Model):
         on_delete=models.SET_NULL,
         related_name="approved_purchases",
     )
+    approval_date = models.DateTimeField(null=True, blank=True)
+    completed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="completed_purchases",
+    )
+    completed_date = models.DateTimeField(null=True, blank=True)
+    cancelled_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="cancelled_purchases",
+    )
+    cancelled_date = models.DateTimeField(null=True, blank=True)
+    status_remark = models.TextField(blank=True, null=True)
 
     def __str__(self):
         return f"{self.purchase_number} ({self.buyer})"

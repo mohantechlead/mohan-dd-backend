@@ -134,7 +134,11 @@ WSGI_APPLICATION = "django_backend.wsgi.application"
 
 DATABASES = {
     "default": dj_database_url.config(
-        default=os.environ.get("DATABASE_URL")
+        # Use DATABASE_URL env var if set, otherwise fall back to local Postgres.
+        default=os.environ.get(
+            "DATABASE_URL",
+            "postgres://postgres:tsedi@localhost:5432/mohan_plc",
+        ),
     )
 }
 

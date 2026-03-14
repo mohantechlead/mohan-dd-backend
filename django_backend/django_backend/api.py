@@ -13,8 +13,9 @@ api.add_router("/inventory/", inventory_router)
 
 
 class UserSchema(Schema):
+    id: int
     username: str
-    isauthenticated: bool
+    role: str
 
 @api.get("/hello")
 def hello(request):
@@ -22,5 +23,10 @@ def hello(request):
 
 @api.get("/me", response=UserSchema, auth=JWTAuth())
 def me(request):
-    return request.user
+    user = request.user
+    return {
+        "id": user.id,
+        "username": user.username,
+        "role": getattr(user, "role", "viewer"),
+    }
 
