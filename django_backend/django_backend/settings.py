@@ -10,15 +10,11 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Core settings
 # ==============================
 
-SECRET_KEY = "django-insecure-change-this-in-production"
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "django-insecure-change-this-in-production")
 
-DEBUG = False
+DEBUG = os.environ.get("DJANGO_DEBUG", "false").lower() == "true"
 
-ALLOWED_HOSTS = [
-    "localhost",
-    "127.0.0.1",
-    ".herokuapp.com",
-]
+ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "localhost,127.0.0.1,.herokuapp.com").split(",")
 
 SITE_ID = 1
 
@@ -60,11 +56,19 @@ AUTH_USER_MODEL = "accounts.User"
 CORS_ALLOWED_ORIGINS = [
     "http://127.0.0.1:3000",
     "http://localhost:3000",
-     "https://mohan-dd-frontend-1ef4128343ba.herokuapp.com",
+    "https://mohan-dd-frontend-1ef4128343ba.herokuapp.com",
+] + [
+    origin.strip()
+    for origin in os.environ.get("CORS_ORIGINS", "").split(",")
+    if origin.strip()
 ]
 
 CSRF_TRUSTED_ORIGINS = [
     "https://mohan-dd-frontend-1ef4128343ba.herokuapp.com",
+] + [
+    origin.strip()
+    for origin in os.environ.get("CORS_ORIGINS", "").split(",")
+    if origin.strip()
 ]
 
 # ==============================
@@ -95,6 +99,7 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "whitenoise.middleware.WhiteNoiseMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.common.CommonMiddleware",
