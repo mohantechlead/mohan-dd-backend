@@ -166,6 +166,7 @@ class ShippingInvoice(models.Model):
     packing_list_remark = models.TextField(blank=True, null=True)
     waybill_remark = models.TextField(blank=True, null=True)
     bill_of_lading_remark = models.TextField(blank=True, null=True)
+    sr_no = models.PositiveIntegerField(blank=True, null=True)
 
     def __str__(self):
         return f"{self.invoice_number} ({self.order.order_number})"
@@ -182,6 +183,8 @@ class ShippingInvoiceItem(models.Model):
     bags = models.FloatField(blank=True, null=True)
     net_weight = models.FloatField(blank=True, null=True)
     gross_weight = models.FloatField(blank=True, null=True)
+    grade = models.CharField(max_length=255, blank=True, null=True)
+    brand = models.CharField(max_length=255, blank=True, null=True)
 
     def __str__(self):
         return f"{self.invoice.invoice_number} - {self.item_name}"

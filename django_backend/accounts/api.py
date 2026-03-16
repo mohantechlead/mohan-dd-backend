@@ -4,8 +4,8 @@ import uuid
 from django.contrib.auth import get_user_model
 from django.http import JsonResponse
 from .models import Partner
-from .schemas import CustomerListSchema,CustomerCreateSchema, CustomerDetailSchema
-from .schemas import SupplierListSchema,SupplierCreateSchema, SupplierDetailSchema
+from .schemas import CustomerListSchema, CustomerCreateSchema, CustomerDetailSchema, CustomerUpdateSchema
+from .schemas import SupplierListSchema, SupplierCreateSchema, SupplierDetailSchema, SupplierUpdateSchema
 from django.shortcuts import get_object_or_404
 from ninja_jwt.authentication import JWTAuth
 
@@ -124,17 +124,67 @@ def change_password(request, user_id: int, payload: ChangePasswordSchema):
     return {"detail": "Password updated successfully."}
 
 
+@router.delete("/users/{user_id}", auth=JWTAuth())
+def delete_user(request, user_id: int):
+    err = _require_admin(request)
+    if err:
+        return err
+    user = get_object_or_404(User, id=user_id)
+    if user.id == request.user.id:
+        return JsonResponse({"detail": "You cannot delete your own account."}, status=400)
+    user.delete()
+    return {"detail": "User deleted successfully."}
+
+
 @router.get("/customer", response=List[CustomerListSchema])
 def list_customers(request):
     qs = Partner.objects.filter(partner_type="customer")
     return qs
 
 @router.get("/customer/{customer_id}", response=CustomerDetailSchema)
-def get_customers(request, customer_id:uuid.UUID):
+def get_customers(request, customer_id: uuid.UUID):
     return get_object_or_404(Partner, partnerid=customer_id)
 
 
-@router.post("/customer", response = CustomerDetailSchema)
+@router.put("/customer/{customer_id}", response=CustomerDetailSchema, auth=JWTAuth())
+def update_customer(request, customer_id: uuid.UUID, payload: CustomerUpdateSchema):
+    err = _require_admin(request)
+    if err:
+        return err
+    customer = get_object_or_404(Partner, partnerid=customer_id)
+    if payload.name is not None:
+        customer.name = payload.name
+    if payload.email is not None:
+        customer.email = payload.email
+    if payload.phone is not None:
+        customer.phone = payload.phone
+    if payload.address is not None:
+        customer.address = payload.address
+    if payload.tin_number is not None:
+        customer.tin_number = payload.tin_number
+    customer.save()
+    return {
+        "id": customer.partnerid,
+        "name": customer.name,
+        "email": customer.email,
+        "phone": customer.phone,
+        "address": customer.address,
+        "tin_number": customer.tin_number,
+        "partner_type": customer.partner_type,
+    }
+
+
+@router.delete("/customer/{customer_id}", auth=JWTAuth())
+def delete_customer(request, customer_id: uuid.UUID):
+    err = _require_admin(request)
+    if err:
+        return err
+    customer = get_object_or_404(Partner, partnerid=customer_id)
+    customer.delete()
+    return {"detail": "Customer deleted successfully."}
+
+
+@router.post("/customer", response=CustomerDetailSchema)
 def create_customer(request, payload: CustomerCreateSchema):
     # Create Customer
     customer = Partner.objects.create(
@@ -162,11 +212,49 @@ def list_suppliers(request):
     return qs
 
 @router.get("/supplier/{supplier_id}", response=SupplierDetailSchema)
-def get_suppliers(request, supplier_id:uuid.UUID):
+def get_suppliers(request, supplier_id: uuid.UUID):
     return get_object_or_404(Partner, partnerid=supplier_id)
 
 
-@router.post("/supplier", response = SupplierDetailSchema)
+@router.put("/supplier/{supplier_id}", response=SupplierDetailSchema, auth=JWTAuth())
+def update_supplier(request, supplier_id: uuid.UUID, payload: SupplierUpdateSchema):
+    err = _require_admin(request)
+    if err:
+        return err
+    supplier = get_object_or_404(Partner, partnerid=supplier_id)
+    if payload.name is not None:
+        supplier.name = payload.name
+    if payload.email is not None:
+        supplier.email = payload.email
+    if payload.phone is not None:
+        supplier.phone = payload.phone
+    if payload.address is not None:
+        supplier.address = payload.address
+    if payload.tin_number is not None:
+        supplier.tin_number = payload.tin_number
+    supplier.save()
+    return {
+        "id": supplier.partnerid,
+        "name": supplier.name,
+        "email": supplier.email,
+        "phone": supplier.phone,
+        "address": supplier.address,
+        "tin_number": supplier.tin_number,
+        "partner_type": supplier.partner_type,
+    }
+
+
+@router.delete("/supplier/{supplier_id}", auth=JWTAuth())
+def delete_supplier(request, supplier_id: uuid.UUID):
+    err = _require_admin(request)
+    if err:
+        return err
+    supplier = get_object_or_404(Partner, partnerid=supplier_id)
+    supplier.delete()
+    return {"detail": "Supplier deleted successfully."}
+
+
+@router.post("/supplier", response=SupplierDetailSchema)
 def create_supplier(request, payload: SupplierCreateSchema):
     # Create supplier
     supplier = Partner.objects.create(

@@ -38,6 +38,17 @@ class GrnDetailSchema(Schema):
     purchase_no: str
     items: List[GrnItemSchema]
 
+
+class GrnUpdateSchema(Schema):
+    supplier_name: str | None = None
+    plate_no: str | None = None
+    purchase_no: str | None = None
+    ECD_no: str | None = None
+    transporter_name: str | None = None
+    storekeeper_name: str | None = None
+    items: List[GrnItemCreateSchema] | None = None
+
+
 class GRNListSchema(Schema):
     supplier_name: str
     grn_no: int
@@ -73,17 +84,40 @@ class DnItemSchema(Schema):
     quantity: int
     
 class DnDetailSchema(Schema):
+    id: uuid.UUID | None = None
     customer_name: str
     dn_no: str
     sales_no: str
     items: Optional[List[DnItemSchema]] = []
+
+
+class DnUpdateSchema(Schema):
+    customer_name: str | None = None
+    plate_no: str | None = None
+    sales_no: str | None = None
+    ECD_no: str | None = None
+    invoice_no: str | None = None
+    gatepass_no: str | None = None
+    despathcher_name: str | None = None
+    receiver_name: str | None = None
+    authorized_by: str | None = None
+    items: List[DnItemCreateSchema] | None = None
+
 
 class ItemCreateSchema(Schema):
     item_name: str
     hscode: str
     internal_code: str
 
+
+class ItemUpdateSchema(Schema):
+    item_name: str | None = None
+    hscode: str | None = None
+    internal_code: str | None = None
+
+
 class ItemSchema(Schema):
+    item_id: uuid.UUID | None = None
     item_name: str
     hscode: str
     internal_code: str
@@ -140,9 +174,11 @@ class OrderDetailSchema(Schema):
     order_number: str
     order_date: date
     buyer: str
+    buyer_address: Optional[str] = None
+    shipper: str
+    shipper_address: Optional[str] = None
     proforma_ref_no: str
     add_consignee: Optional[str]
-    shipper: str
     notify_party: Optional[str]
     add_notify_party: Optional[str]
     country_of_origin: str
@@ -240,6 +276,7 @@ class PurchaseDetailSchema(Schema):
     purchase_number: str
     order_date: date
     buyer: str
+    buyer_address: Optional[str] = None
     proforma_ref_no: str
     status: str
     approved_by: Optional[str] = None
@@ -251,6 +288,7 @@ class PurchaseDetailSchema(Schema):
     status_remark: Optional[str] = None
     add_consignee: Optional[str] = None
     shipper: Optional[str] = None
+    shipper_address: Optional[str] = None
     notify_party: Optional[str] = None
     add_notify_party: Optional[str] = None
     country_of_origin: Optional[str] = None
@@ -310,6 +348,8 @@ class ShippingInvoiceItemCreateSchema(Schema):
     bags: Optional[float]
     net_weight: Optional[float]
     gross_weight: Optional[float]
+    grade: Optional[str] = None
+    brand: Optional[str] = None
 
 
 class ShippingInvoiceCreateSchema(Schema):
@@ -324,6 +364,7 @@ class ShippingInvoiceCreateSchema(Schema):
     packing_list_remark: Optional[str]
     waybill_remark: Optional[str]
     bill_of_lading_remark: Optional[str]
+    sr_no: Optional[int] = None
     items: List[ShippingInvoiceItemCreateSchema]
 
 
@@ -337,6 +378,7 @@ class ShippingInvoiceUpdateSchema(Schema):
     packing_list_remark: Optional[str]
     waybill_remark: Optional[str]
     bill_of_lading_remark: Optional[str]
+    sr_no: Optional[int] = None
     items: List[ShippingInvoiceItemCreateSchema]
 
 
@@ -356,6 +398,8 @@ class ShippingInvoiceItemSchema(Schema):
     bags: Optional[float]
     net_weight: Optional[float]
     gross_weight: Optional[float]
+    grade: Optional[str] = None
+    brand: Optional[str] = None
 
 
 class ShippingInvoiceDetailSchema(Schema):
@@ -371,4 +415,5 @@ class ShippingInvoiceDetailSchema(Schema):
     packing_list_remark: Optional[str]
     waybill_remark: Optional[str]
     bill_of_lading_remark: Optional[str]
+    sr_no: Optional[int] = None
     items: List[ShippingInvoiceItemSchema]

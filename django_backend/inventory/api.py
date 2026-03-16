@@ -2,6 +2,7 @@ from ninja import Router
 from typing import List, Optional
 from django.shortcuts import get_object_or_404
 from ninja_jwt.authentication import JWTAuth
+from accounts.models import Partner
 from .models import (
     GRN,
     GrnItems,
@@ -19,12 +20,17 @@ from .models import (
 from .schemas import (
     GrnCreateSchema,
     GrnDetailSchema,
+    GrnUpdateSchema,
     GRNListSchema,
     GrnItemSchema,
+    GrnItemCreateSchema,
     DnCreateSchema,
     DnDetailSchema,
+    DnUpdateSchema,
     DnItemSchema,
+    DnItemCreateSchema,
     ItemCreateSchema,
+    ItemUpdateSchema,
     ItemSchema,
     StockSchema,
     OrderCreateSchema,
@@ -63,6 +69,22 @@ def _require_admin(request):
     if role != "admin" and not getattr(user, "is_superuser", False):
         return JsonResponse({"detail": "Admin role required to access this resource."}, status=403)
     return None
+
+
+def _get_customer_address(name: str) -> Optional[str]:
+    """Look up customer address by name (partner_type in customer, both)."""
+    p = Partner.objects.filter(name__iexact=name.strip()).filter(
+        partner_type__in=("customer", "both")
+    ).first()
+    return p.address if p and p.address else None
+
+
+def _get_supplier_address(name: str) -> Optional[str]:
+    """Look up supplier address by name (partner_type in supplier, both)."""
+    p = Partner.objects.filter(name__iexact=name.strip()).filter(
+        partner_type__in=("supplier", "both")
+    ).first()
+    return p.address if p and p.address else None
 
 
 @router.post("/grn", response=GrnDetailSchema)
@@ -136,7 +158,67 @@ def list_GRN(request):
 
 @router.get("/grn/{grn_no}", response=GrnDetailSchema)
 def get_GRN(request, grn_no: str):
-    return get_object_or_404(GRN, grn_no=grn_no)
+    grn = get_object_or_404(GRN, grn_no=int(grn_no) if grn_no.isdigit() else grn_no)
+    return _grn_to_detail(grn)
+
+
+@router.put("/grn/{grn_no}", response=GrnDetailSchema, auth=JWTAuth())
+def update_GRN(request, grn_no: str, payload: GrnUpdateSchema):
+    err = _require_admin(request)
+    if err:
+        return err
+    grn = get_object_or_404(GRN, grn_no=int(grn_no) if grn_no.isdigit() else grn_no)
+    if payload.supplier_name is not None:
+        grn.supplier_name = payload.supplier_name
+    if payload.plate_no is not None:
+        grn.plate_no = payload.plate_no
+    if payload.purchase_no is not None:
+        grn.purchase_no = payload.purchase_no
+    if payload.ECD_no is not None:
+        grn.ECD_no = payload.ECD_no
+    if payload.transporter_name is not None:
+        grn.transporter_name = payload.transporter_name
+    if payload.storekeeper_name is not None:
+        grn.storekeeper_name = payload.storekeeper_name
+    if payload.items is not None:
+        grn.items.all().delete()
+        for item in payload.items:
+            GrnItems.objects.create(
+                item_id=uuid.uuid4(),
+                grn=grn,
+                item_name=item.item_name,
+                quantity=item.quantity,
+                unit_measurement=item.unit_measurement,
+                internal_code=item.internal_code,
+                bags=getattr(item, "bags", None),
+            )
+    grn.save()
+    grn.refresh_from_db()
+    return _grn_to_detail(grn)
+
+
+@router.delete("/grn/{grn_no}", auth=JWTAuth())
+def delete_GRN(request, grn_no: str):
+    err = _require_admin(request)
+    if err:
+        return err
+    grn = get_object_or_404(GRN, grn_no=int(grn_no) if grn_no.isdigit() else grn_no)
+    grn.delete()
+    return {"detail": "GRN deleted successfully."}
+
+
+def _grn_to_detail(grn):
+    return {
+        "id": grn.id,
+        "supplier_name": grn.supplier_name,
+        "grn_no": str(grn.grn_no),
+        "plate_no": grn.plate_no,
+        "purchase_no": grn.purchase_no,
+        "items": [
+            {"item_name": item.item_name, "quantity": item.quantity}
+            for item in grn.items.all()
+        ],
+    }
 
 
 # Add more endpoints as needed for DN and other functionalities
@@ -184,6 +266,77 @@ def create_dn(request, payload: DnCreateSchema):
         "items": created_items
     }
 
+
+@router.get("/dn/{dn_no}", response=DnDetailSchema)
+def get_DN(request, dn_no: str):
+    dn = get_object_or_404(DN, dn_no=dn_no)
+    return _dn_to_detail(dn)
+
+
+@router.put("/dn/{dn_no}", response=DnDetailSchema, auth=JWTAuth())
+def update_DN(request, dn_no: str, payload: DnUpdateSchema):
+    err = _require_admin(request)
+    if err:
+        return err
+    dn = get_object_or_404(DN, dn_no=dn_no)
+    if payload.customer_name is not None:
+        dn.customer_name = payload.customer_name
+    if payload.plate_no is not None:
+        dn.plate_no = payload.plate_no
+    if payload.sales_no is not None:
+        dn.sales_no = payload.sales_no
+    if payload.ECD_no is not None:
+        dn.ECD_no = payload.ECD_no
+    if payload.invoice_no is not None:
+        dn.invoice_no = payload.invoice_no
+    if payload.gatepass_no is not None:
+        dn.gatepass_no = payload.gatepass_no
+    if payload.despathcher_name is not None:
+        dn.despathcher_name = payload.despathcher_name
+    if payload.receiver_name is not None:
+        dn.receiver_name = payload.receiver_name
+    if payload.authorized_by is not None:
+        dn.authorized_by = payload.authorized_by
+    if payload.items is not None:
+        dn.dn_items.all().delete()
+        for item in payload.items:
+            DNItems.objects.create(
+                item_id=uuid.uuid4(),
+                dn=dn,
+                item_name=item.item_name,
+                quantity=item.quantity,
+                unit_measurement=item.unit_measurement,
+                internal_code=getattr(item, "internal_code", None),
+                bags=getattr(item, "bags", None),
+            )
+    dn.save()
+    dn.refresh_from_db()
+    return _dn_to_detail(dn)
+
+
+@router.delete("/dn/{dn_no}", auth=JWTAuth())
+def delete_DN(request, dn_no: str):
+    err = _require_admin(request)
+    if err:
+        return err
+    dn = get_object_or_404(DN, dn_no=dn_no)
+    dn.delete()
+    return {"detail": "DN deleted successfully."}
+
+
+def _dn_to_detail(dn):
+    return {
+        "id": dn.id,
+        "customer_name": dn.customer_name,
+        "dn_no": dn.dn_no,
+        "sales_no": dn.sales_no,
+        "items": [
+            {"item_name": item.item_name, "quantity": item.quantity}
+            for item in dn.dn_items.all()
+        ],
+    }
+
+
 @router.get("/dn", response=List[DnDetailSchema])
 def list_DN(request):
     try:
@@ -192,6 +345,7 @@ def list_DN(request):
         for dn in dns:
             result.append(
                 DnDetailSchema(
+                    id=dn.id,
                     customer_name=dn.customer_name,
                     dn_no=dn.dn_no,
                     sales_no=dn.sales_no,
@@ -235,7 +389,39 @@ def create_item(request, payload: ItemCreateSchema):
 @router.get("/items", response=list[ItemSchema])
 def display_item(request):
     items = Items.objects.all()
-    return items
+    return list(items)
+
+
+@router.get("/items/{item_id}", response=ItemSchema)
+def get_item(request, item_id: uuid.UUID):
+    return get_object_or_404(Items, item_id=item_id)
+
+
+@router.put("/items/{item_id}", response=ItemSchema, auth=JWTAuth())
+def update_item(request, item_id: uuid.UUID, payload: ItemUpdateSchema):
+    err = _require_admin(request)
+    if err:
+        return err
+    item = get_object_or_404(Items, item_id=item_id)
+    if payload.item_name is not None:
+        item.item_name = payload.item_name
+    if payload.hscode is not None:
+        item.hscode = payload.hscode
+    if payload.internal_code is not None:
+        item.internal_code = payload.internal_code
+    item.save()
+    return item
+
+
+@router.delete("/items/{item_id}", auth=JWTAuth())
+def delete_item(request, item_id: uuid.UUID):
+    err = _require_admin(request)
+    if err:
+        return err
+    item = get_object_or_404(Items, item_id=item_id)
+    item.delete()
+    return {"detail": "Item deleted successfully."}
+
 
 @router.get("/stock", response=list[StockSchema])
 def display_stock(request):
@@ -335,9 +521,11 @@ def create_order(request, payload: OrderCreateSchema):
         "order_number": order.order_number,
         "order_date": order.order_date,
         "buyer": order.buyer,
+        "buyer_address": _get_customer_address(order.buyer),
         "proforma_ref_no": order.proforma_ref_no,
         "add_consignee": order.add_consignee,
         "shipper": order.shipper,
+        "shipper_address": _get_supplier_address(order.shipper),
         "notify_party": order.notify_party,
         "add_notify_party": order.add_notify_party,
         "country_of_origin": order.country_of_origin,
@@ -383,9 +571,11 @@ def list_orders(request):
                 order_number=o.order_number,
                 order_date=o.order_date,
                 buyer=o.buyer,
+                buyer_address=_get_customer_address(o.buyer),
                 proforma_ref_no=o.proforma_ref_no,
                 add_consignee=o.add_consignee,
                 shipper=o.shipper,
+                shipper_address=_get_supplier_address(o.shipper),
                 notify_party=o.notify_party,
                 add_notify_party=o.add_notify_party,
                 country_of_origin=o.country_of_origin,
@@ -433,9 +623,11 @@ def get_order_detail(request, order_number: str):
         order_number=order.order_number,
         order_date=order.order_date,
         buyer=order.buyer,
+        buyer_address=_get_customer_address(order.buyer),
         proforma_ref_no=order.proforma_ref_no,
         add_consignee=order.add_consignee,
         shipper=order.shipper,
+        shipper_address=_get_supplier_address(order.shipper),
         notify_party=order.notify_party,
         add_notify_party=order.add_notify_party,
         country_of_origin=order.country_of_origin,
@@ -470,8 +662,11 @@ def get_order_detail(request, order_number: str):
     )
 
 
-@router.put("/orders/{order_number}", response=OrderDetailSchema)
+@router.put("/orders/{order_number}", response=OrderDetailSchema, auth=JWTAuth())
 def update_order(request, order_number: str, payload: OrderUpdateSchema):
+    err = _require_admin(request)
+    if err:
+        return err
     order = get_object_or_404(
         Order.objects.prefetch_related("items"),
         order_number__iexact=order_number.strip(),
@@ -501,9 +696,11 @@ def update_order(request, order_number: str, payload: OrderUpdateSchema):
         order_number=order.order_number,
         order_date=order.order_date,
         buyer=order.buyer,
+        buyer_address=_get_customer_address(order.buyer),
         proforma_ref_no=order.proforma_ref_no,
         add_consignee=order.add_consignee,
         shipper=order.shipper,
+        shipper_address=_get_supplier_address(order.shipper),
         notify_party=order.notify_party,
         add_notify_party=order.add_notify_party,
         country_of_origin=order.country_of_origin,
@@ -537,6 +734,16 @@ def update_order(request, order_number: str, payload: OrderUpdateSchema):
         ],
     )
 
+@router.delete("/orders/{order_number}", auth=JWTAuth())
+def delete_order(request, order_number: str):
+    err = _require_admin(request)
+    if err:
+        return err
+    order = get_object_or_404(Order, order_number__iexact=order_number.strip())
+    order.delete()
+    return {"detail": "Order deleted successfully."}
+
+
 @router.post("/orders/{order_number}/approve", response=OrderDetailSchema, auth=JWTAuth())
 def approve_order(request, order_number: str, payload: OrderApproveSchema):
     err = _require_admin(request)
@@ -554,9 +761,11 @@ def approve_order(request, order_number: str, payload: OrderApproveSchema):
         order_number=order.order_number,
         order_date=order.order_date,
         buyer=order.buyer,
+        buyer_address=_get_customer_address(order.buyer),
         proforma_ref_no=order.proforma_ref_no,
         add_consignee=order.add_consignee,
         shipper=order.shipper,
+        shipper_address=_get_supplier_address(order.shipper),
         notify_party=order.notify_party,
         add_notify_party=order.add_notify_party,
         country_of_origin=order.country_of_origin,
@@ -625,9 +834,11 @@ def update_order_status(request, order_number: str, payload: OrderStatusUpdateSc
         order_number=order.order_number,
         order_date=order.order_date,
         buyer=order.buyer,
+        buyer_address=_get_customer_address(order.buyer),
         proforma_ref_no=order.proforma_ref_no,
         add_consignee=order.add_consignee,
         shipper=order.shipper,
+        shipper_address=_get_supplier_address(order.shipper),
         notify_party=order.notify_party,
         add_notify_party=order.add_notify_party,
         country_of_origin=order.country_of_origin,
@@ -721,6 +932,16 @@ def get_purchase_detail(request, purchase_number: str):
     return _purchase_to_detail_schema(purchase)
 
 
+@router.delete("/purchases/{purchase_number}", auth=JWTAuth())
+def delete_purchase(request, purchase_number: str):
+    err = _require_admin(request)
+    if err:
+        return err
+    purchase = get_object_or_404(Purchase, purchase_number__iexact=purchase_number.strip())
+    purchase.delete()
+    return {"detail": "Purchase deleted successfully."}
+
+
 @router.post("/purchases/{purchase_number}/approve", response=PurchaseDetailSchema, auth=JWTAuth())
 def approve_purchase(request, purchase_number: str, payload: PurchaseApproveSchema):
     err = _require_admin(request)
@@ -743,6 +964,7 @@ def _purchase_to_detail_schema(purchase):
         purchase_number=purchase.purchase_number,
         order_date=purchase.order_date,
         buyer=purchase.buyer,
+        buyer_address=_get_customer_address(purchase.buyer),
         proforma_ref_no=purchase.proforma_ref_no,
         status=purchase.status,
         approved_by=purchase.approved_by.username if purchase.approved_by else None,
@@ -754,6 +976,7 @@ def _purchase_to_detail_schema(purchase):
         status_remark=purchase.status_remark,
         add_consignee=purchase.add_consignee,
         shipper=purchase.shipper,
+        shipper_address=_get_supplier_address(purchase.shipper),
         notify_party=purchase.notify_party,
         add_notify_party=purchase.add_notify_party,
         country_of_origin=purchase.country_of_origin,
@@ -781,8 +1004,11 @@ def _purchase_to_detail_schema(purchase):
     )
 
 
-@router.put("/purchases/{purchase_number}", response=PurchaseDetailSchema)
+@router.put("/purchases/{purchase_number}", response=PurchaseDetailSchema, auth=JWTAuth())
 def update_purchase(request, purchase_number: str, payload: PurchaseUpdateSchema):
+    err = _require_admin(request)
+    if err:
+        return err
     purchase = get_object_or_404(
         Purchase.objects.prefetch_related("items"),
         purchase_number__iexact=purchase_number.strip(),
@@ -866,8 +1092,10 @@ def list_purchases(request):
 
 @router.post("/shipping-invoices", response=ShippingInvoiceSummarySchema)
 def create_shipping_invoice(request, payload: ShippingInvoiceCreateSchema):
-    # Prevent duplicate invoice numbers
-    if ShippingInvoice.objects.filter(invoice_number=payload.invoice_number).exists():
+    # Prevent duplicate invoice numbers (case-insensitive)
+    if ShippingInvoice.objects.filter(
+        invoice_number__iexact=payload.invoice_number.strip()
+    ).exists():
         return JsonResponse(
             {"detail": "Invoice number already exists."},
             status=400,
@@ -891,6 +1119,7 @@ def create_shipping_invoice(request, payload: ShippingInvoiceCreateSchema):
         packing_list_remark=payload.packing_list_remark,
         waybill_remark=payload.waybill_remark,
         bill_of_lading_remark=payload.bill_of_lading_remark,
+        sr_no=payload.sr_no,
     )
 
     for item in payload.items:
@@ -905,6 +1134,8 @@ def create_shipping_invoice(request, payload: ShippingInvoiceCreateSchema):
             bags=item.bags,
             net_weight=item.net_weight,
             gross_weight=item.gross_weight,
+            grade=item.grade,
+            brand=item.brand,
         )
 
     return ShippingInvoiceSummarySchema(
@@ -954,6 +1185,7 @@ def get_shipping_invoice_detail(request, invoice_id: uuid.UUID):
         packing_list_remark=invoice.packing_list_remark,
         waybill_remark=invoice.waybill_remark,
         bill_of_lading_remark=invoice.bill_of_lading_remark,
+        sr_no=invoice.sr_no,
         items=[
             ShippingInvoiceItemSchema(
                 item_name=i.item_name,
@@ -964,6 +1196,8 @@ def get_shipping_invoice_detail(request, invoice_id: uuid.UUID):
                 bags=i.bags,
                 net_weight=i.net_weight,
                 gross_weight=i.gross_weight,
+                grade=i.grade,
+                brand=i.brand,
             )
             for i in invoice.items.all()
         ],
@@ -987,6 +1221,7 @@ def update_shipping_invoice(
     invoice.packing_list_remark = payload.packing_list_remark
     invoice.waybill_remark = payload.waybill_remark
     invoice.bill_of_lading_remark = payload.bill_of_lading_remark
+    invoice.sr_no = payload.sr_no
     invoice.save()
 
     # Replace items
@@ -1003,6 +1238,8 @@ def update_shipping_invoice(
             bags=item.bags,
             net_weight=item.net_weight,
             gross_weight=item.gross_weight,
+            grade=item.grade,
+            brand=item.brand,
         )
 
     invoice.refresh_from_db()
@@ -1020,6 +1257,7 @@ def update_shipping_invoice(
         packing_list_remark=invoice.packing_list_remark,
         waybill_remark=invoice.waybill_remark,
         bill_of_lading_remark=invoice.bill_of_lading_remark,
+        sr_no=invoice.sr_no,
         items=[
             ShippingInvoiceItemSchema(
                 item_name=i.item_name,
@@ -1030,6 +1268,8 @@ def update_shipping_invoice(
                 bags=i.bags,
                 net_weight=i.net_weight,
                 gross_weight=i.gross_weight,
+                grade=i.grade,
+                brand=i.brand,
             )
             for i in invoice.items.all()
         ],

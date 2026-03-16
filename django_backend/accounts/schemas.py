@@ -17,6 +17,14 @@ class CustomerCreateSchema(Schema):
     address: str | None = None
     tin_number: str | None = None
     partner_type: str
+
+
+class CustomerUpdateSchema(Schema):
+    name: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    address: str | None = None
+    tin_number: str | None = None
    
 class CustomerListSchema(Schema):
     id: uuid.UUID = Field(alias="partnerid")
@@ -28,11 +36,12 @@ class CustomerListSchema(Schema):
     tin_number: str
 
 class CustomerDetailSchema(Schema):
+    id: uuid.UUID | None = None
     name: str
     email: str | None
     phone: str | None
     address: str | None
-    tin_number: str | None 
+    tin_number: str | None
     partner_type: str
 
 class SupplierCreateSchema(Schema):
@@ -42,6 +51,14 @@ class SupplierCreateSchema(Schema):
     address: str | None = None
     tin_number: str | None = None
     partner_type: str
+
+
+class SupplierUpdateSchema(Schema):
+    name: str | None = None
+    email: str | None = None
+    phone: str | None = None
+    address: str | None = None
+    tin_number: str | None = None
    
 class SupplierListSchema(Schema):
     id: uuid.UUID = Field(alias="partnerid")
@@ -53,9 +70,10 @@ class SupplierListSchema(Schema):
     tin_number: str
 
 class SupplierDetailSchema(Schema):
+    id: uuid.UUID | None = None
     name: str
     email: str | None
     phone: str | None
     address: str | None
-    tin_number: str | None 
+    tin_number: str | None
     partner_type: str
