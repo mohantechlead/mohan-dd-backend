@@ -3,7 +3,12 @@ import logging
 from ninja import Router
 from typing import List, Optional
 from datetime import datetime
+from datetime import datetime
 from django.shortcuts import get_object_or_404
+from django.core.mail import send_mail
+from django.conf import settings
+
+logger = logging.getLogger(__name__)
 from django.core.mail import send_mail
 from django.conf import settings
 
@@ -73,6 +78,7 @@ def _require_admin(request):
     if not user or not user.is_authenticated:
         return JsonResponse({"detail": "Authentication required."}, status=401)
     role = getattr(user, "role", "logistics")
+    role = getattr(user, "role", "logistics")
     if role != "admin" and not getattr(user, "is_superuser", False):
         return JsonResponse({"detail": "Admin role required to access this resource."}, status=403)
     return None
@@ -92,6 +98,204 @@ def _get_supplier_address(name: str) -> Optional[str]:
         partner_type__in=("supplier", "both")
     ).first()
     return p.address if p and p.address else None
+
+
+def _check_and_notify_negative_stock():
+    """Check if any item has negative stock and send email notification if so."""
+    items = Items.objects.all()
+    negative_items = []
+
+    for item in items:
+        grn_totals = GrnItems.objects.filter(
+            internal_code=item.internal_code
+        ).aggregate(
+            quantity=Sum("quantity"),
+            bags=Sum("bags")
+        )
+        dn_totals = DNItems.objects.filter(
+            internal_code=item.internal_code
+        ).aggregate(
+            quantity=Sum("quantity"),
+            bags=Sum("bags")
+        )
+
+        grn_qty = grn_totals["quantity"] or 0
+        grn_bags = grn_totals["bags"] or 0
+        dn_qty = dn_totals["quantity"] or 0
+        dn_bags = dn_totals["bags"] or 0
+
+        stock_quantity = grn_qty - dn_qty
+        stock_bags = grn_bags - dn_bags
+
+        if stock_quantity < 0 or stock_bags < 0:
+            negative_items.append({
+                "item_name": item.item_name,
+                "internal_code": item.internal_code or "",
+                "quantity": stock_quantity,
+                "package": stock_bags,
+            })
+
+    if not negative_items:
+        return
+
+    try:
+        lines = [
+            "The following items have negative stock:",
+            "",
+        ]
+        for ni in negative_items:
+            lines.append(
+                f"  - {ni['item_name']} (code: {ni['internal_code']}): "
+                f"quantity={ni['quantity']}, package={ni['package']}"
+            )
+        message = "\n".join(lines)
+
+        sent = send_mail(
+            subject="Negative Stock Alert",
+            message=message,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[
+                "sol@mohanplc.com",
+                "Kapil@mohanint.com",
+                "Harsh@mohanplc.com",
+                "Mayuraddis@gmail.com",
+                "Amritakaur2612@gmail.com",
+            ],
+            fail_silently=True,
+        )
+        if sent > 0:
+            logger.info("Negative stock alert email sent to recipients")
+        else:
+            logger.warning("Negative stock alert email sent count was 0")
+    except Exception as e:
+        logger.exception("Failed to send negative stock alert email: %s", e)
+
+
+def _check_and_notify_over_under_delivery(dn):
+    """
+    Compare DN total delivered quantities vs Invoice (ShippingInvoice) quantities for sales_no.
+    Uses the invoice linked by dn.invoice_no when present; otherwise skips.
+    Send email if any item has over delivery (delivered > invoiced) or under delivery (delivered < invoiced).
+    Returns (over_items, under_items) for API response.
+    """
+    over_items = []
+    under_items = []
+    try:
+        invoice_no = (dn.invoice_no or "").strip()
+        if not invoice_no:
+            logger.info(
+                "Over/under delivery check skipped: no invoice_no on DN %s (sales_no=%s)",
+                dn.dn_no,
+                dn.sales_no,
+            )
+            return over_items, under_items
+
+        order = Order.objects.filter(order_number=dn.sales_no).first()
+        if not order:
+            logger.info(
+                "Over/under delivery check skipped: no Order found with order_number=%s (DN %s)",
+                dn.sales_no,
+                dn.dn_no,
+            )
+            return over_items, under_items
+
+        invoice = ShippingInvoice.objects.filter(
+            order=order,
+            invoice_number__iexact=invoice_no,
+        ).prefetch_related("items").first()
+
+        if not invoice:
+            logger.info(
+                "Over/under delivery check skipped: no ShippingInvoice found with invoice_number=%s for order %s (DN %s)",
+                invoice_no,
+                dn.sales_no,
+                dn.dn_no,
+            )
+            return over_items, under_items
+
+        # Aggregate invoice quantities by item_name (invoice can have same item on multiple lines)
+        invoiced_by_item = {}
+        for inv_item in invoice.items.all():
+            name = inv_item.item_name
+            qty = int(inv_item.quantity)
+            invoiced_by_item[name] = invoiced_by_item.get(name, 0) + qty
+
+        # Compare total invoiced vs total delivered per item
+        for item_name, total_invoiced in invoiced_by_item.items():
+            total_delivered = DNItems.objects.filter(
+                dn__sales_no=dn.sales_no,
+                item_name=item_name,
+            ).aggregate(total=Sum("quantity"))["total"] or 0
+
+            if total_delivered > total_invoiced:
+                over_items.append({
+                    "item_name": item_name,
+                    "invoiced": total_invoiced,
+                    "delivered": total_delivered,
+                    "variance": total_delivered - total_invoiced,
+                })
+            elif total_delivered < total_invoiced:
+                under_items.append({
+                    "item_name": item_name,
+                    "invoiced": total_invoiced,
+                    "delivered": total_delivered,
+                    "variance": total_invoiced - total_delivered,
+                })
+
+        if not over_items and not under_items:
+            logger.info(
+                "Over/under delivery check: no variance for DN %s (sales_no=%s) - all quantities match invoice",
+                dn.dn_no,
+                dn.sales_no,
+            )
+            return over_items, under_items
+
+        lines = [
+            f"Delivery Note: {dn.dn_no}",
+            f"Order/Sales No: {dn.sales_no}",
+            f"Invoice: {invoice.invoice_number}",
+            f"Customer: {dn.customer_name}",
+            "",
+        ]
+
+        if over_items:
+            lines.append("OVER DELIVERY:")
+            for it in over_items:
+                lines.append(
+                    f"  - {it['item_name']}: invoiced={it['invoiced']}, delivered={it['delivered']} "
+                    f"(over by {it['variance']})"
+                )
+            lines.append("")
+
+        if under_items:
+            lines.append("UNDER DELIVERY:")
+            for it in under_items:
+                lines.append(
+                    f"  - {it['item_name']}: invoiced={it['invoiced']}, delivered={it['delivered']} "
+                    f"(short by {it['variance']})"
+                )
+
+        message = "\n".join(lines)
+        subject = "Over/Under Delivery Notification"
+
+        recipient_list = getattr(settings, "OVER_UNDER_DELIVERY_RECIPIENTS", [])
+
+        if recipient_list:
+            sent = send_mail(
+                subject=subject,
+                message=message,
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=recipient_list,
+                fail_silently=True,
+            )
+            if sent > 0:
+                logger.info("Over/under delivery notification sent to %s", recipient_list)
+            else:
+                logger.warning("Over/under delivery email sent count was 0")
+    except Exception as e:
+        logger.exception("Failed to send over/under delivery notification: %s", e)
+
+    return over_items, under_items
 
 
 def _check_and_notify_negative_stock():
@@ -343,7 +547,66 @@ def create_grn(request, payload: GrnCreateSchema):
                 bags=bags_val,
             )
             created_items.append(new_item)
+    try:
+        if not payload.date:
+            return JsonResponse(
+                {"detail": "Date is required."},
+                status=400,
+            )
+        grn_no_val = int(payload.grn_no) if str(payload.grn_no).strip().isdigit() else None
+        if grn_no_val is None:
+            return JsonResponse(
+                {"detail": "GRN No must be a valid number."},
+                status=400,
+            )
+        if GRN.objects.filter(grn_no=grn_no_val).exists():
+            return JsonResponse(
+                {"detail": f"GRN No '{payload.grn_no}' already exists."},
+                status=400,
+            )
 
+        grn = GRN.objects.create(
+            id=uuid.uuid4(),
+            supplier_name=payload.supplier_name,
+            grn_no=grn_no_val,
+            plate_no=payload.plate_no,
+            purchase_no=payload.purchase_no,
+            date=payload.date,
+            ECD_no=payload.ECD_no,
+            transporter_name=payload.transporter_name,
+            storekeeper_name=payload.storekeeper_name,
+        )
+
+        created_items = []
+        for item in payload.items:
+            bags_val = None
+            if item.bags is not None and str(item.bags).strip():
+                try:
+                    bags_val = float(item.bags)
+                except (ValueError, TypeError):
+                    pass
+
+            new_item = GrnItems.objects.create(
+                item_id=uuid.uuid4(),
+                grn=grn,
+                item_name=item.item_name,
+                quantity=int(item.quantity) if item.quantity is not None else 0,
+                unit_measurement=item.unit_measurement or "",
+                internal_code=item.internal_code or None,
+                bags=bags_val,
+            )
+            created_items.append(new_item)
+
+        _check_and_notify_negative_stock()
+
+        grn.refresh_from_db()
+        return _grn_to_detail(grn)
+    except Exception as e:
+        logger.exception("GRN create failed: %s", e)
+        return JsonResponse(
+            {"detail": str(e), "message": "Failed to create GRN."},
+            status=500,
+        )
         _check_and_notify_negative_stock()
 
         grn.refresh_from_db()
@@ -424,6 +687,8 @@ def update_GRN(request, grn_no: str, payload: GrnUpdateSchema):
     grn.refresh_from_db()
     if payload.items is not None:
         _check_and_notify_negative_stock()
+    if payload.items is not None:
+        _check_and_notify_negative_stock()
     return _grn_to_detail(grn)
 
 
@@ -434,6 +699,7 @@ def delete_GRN(request, grn_no: str):
         return err
     grn = get_object_or_404(GRN, grn_no=int(grn_no) if grn_no.isdigit() else grn_no)
     grn.delete()
+    _check_and_notify_negative_stock()
     _check_and_notify_negative_stock()
     return {"detail": "GRN deleted successfully."}
 
@@ -456,6 +722,44 @@ def _grn_to_detail(grn):
 
 @router.post("/dn", response=DnDetailSchema)
 def create_dn(request, payload: DnCreateSchema):
+    if DN.objects.filter(dn_no=payload.dn_no).exists():
+        return JsonResponse(
+            {"detail": f"Delivery number '{payload.dn_no}' already exists."},
+            status=400,
+        )
+
+    invoice_no = (payload.invoice_no or "").strip()
+    if invoice_no:
+        # Verify invoice belongs to this order
+        invoice = ShippingInvoice.objects.filter(
+            invoice_number__iexact=invoice_no,
+        ).select_related("order").first()
+        if not invoice:
+            return JsonResponse(
+                {"detail": f"Invoice '{invoice_no}' not found."},
+                status=400,
+            )
+        if invoice.order.order_number != payload.sales_no:
+            return JsonResponse(
+                {
+                    "detail": f"Invoice '{invoice_no}' does not belong to order '{payload.sales_no}'. "
+                    "Order number and invoice number must match."
+                },
+                status=400,
+            )
+        # One DN per invoice: cannot create if DN already exists for this invoice
+        existing = DN.objects.filter(
+            sales_no=payload.sales_no,
+            invoice_no__iexact=invoice_no,
+        ).first()
+        if existing:
+            return JsonResponse(
+                {
+                    "detail": f"A Delivery Note (DN {existing.dn_no}) already exists for this invoice. "
+                    "Please edit the existing one instead of creating a new one."
+                },
+                status=400,
+            )
     if DN.objects.filter(dn_no=payload.dn_no).exists():
         return JsonResponse(
             {"detail": f"Delivery number '{payload.dn_no}' already exists."},
@@ -528,7 +832,11 @@ def create_dn(request, payload: DnCreateSchema):
     _check_and_notify_negative_stock()
     over_items, under_items = _check_and_notify_over_under_delivery(dn)
 
+    _check_and_notify_negative_stock()
+    over_items, under_items = _check_and_notify_over_under_delivery(dn)
+
     # Return structured response
+    result = {
     result = {
         "id": dn.id,
         "customer_name": dn.customer_name,
@@ -539,7 +847,16 @@ def create_dn(request, payload: DnCreateSchema):
             {"item_name": i.item_name, "quantity": i.quantity}
             for i in created_items
         ],
+        "items": [
+            {"item_name": i.item_name, "quantity": i.quantity}
+            for i in created_items
+        ],
     }
+    if over_items:
+        result["over_items"] = over_items
+    if under_items:
+        result["under_items"] = under_items
+    return result
     if over_items:
         result["over_items"] = over_items
     if under_items:
@@ -559,6 +876,39 @@ def update_DN(request, dn_no: str, payload: DnUpdateSchema):
     if err:
         return err
     dn = get_object_or_404(DN, dn_no=dn_no)
+
+    new_sales_no = payload.sales_no if payload.sales_no is not None else dn.sales_no
+    new_invoice_no = (payload.invoice_no or "").strip() if payload.invoice_no is not None else (dn.invoice_no or "")
+    if new_invoice_no:
+        invoice = ShippingInvoice.objects.filter(
+            invoice_number__iexact=new_invoice_no,
+        ).select_related("order").first()
+        if not invoice:
+            return JsonResponse(
+                {"detail": f"Invoice '{new_invoice_no}' not found."},
+                status=400,
+            )
+        if invoice.order.order_number != new_sales_no:
+            return JsonResponse(
+                {
+                    "detail": f"Invoice '{new_invoice_no}' does not belong to order '{new_sales_no}'. "
+                    "Order number and invoice number must match."
+                },
+                status=400,
+            )
+        existing = DN.objects.filter(
+            sales_no=new_sales_no,
+            invoice_no__iexact=new_invoice_no,
+        ).exclude(dn_no=dn.dn_no).first()
+        if existing:
+            return JsonResponse(
+                {
+                    "detail": f"A Delivery Note (DN {existing.dn_no}) already exists for this invoice. "
+                    "Please edit that one instead."
+                },
+                status=400,
+            )
+
 
     new_sales_no = payload.sales_no if payload.sales_no is not None else dn.sales_no
     new_invoice_no = (payload.invoice_no or "").strip() if payload.invoice_no is not None else (dn.invoice_no or "")
@@ -624,6 +974,15 @@ def update_DN(request, dn_no: str, payload: DnUpdateSchema):
             )
     dn.save()
     dn.refresh_from_db()
+    _check_and_notify_negative_stock()
+    over_items, under_items = _check_and_notify_over_under_delivery(dn)
+
+    result = _dn_to_detail(dn)
+    if over_items:
+        result["over_items"] = over_items
+    if under_items:
+        result["under_items"] = under_items
+    return result
     _check_and_notify_negative_stock()
     over_items, under_items = _check_and_notify_over_under_delivery(dn)
 
@@ -1011,6 +1370,19 @@ def update_order(request, order_number: str, payload: OrderUpdateSchema):
     order.freight_price = payload.freight_price
     order.shipment_type = payload.shipment_type
     order.save()
+
+    if payload.items is not None:
+        order.items.all().delete()
+        for item in payload.items:
+            OrderItem.objects.create(
+                order=order,
+                item_name=item.item_name,
+                hs_code=item.hs_code,
+                price=item.price,
+                quantity=item.quantity,
+                total_price=item.total_price,
+                measurement=item.measurement,
+            )
 
     if payload.items is not None:
         order.items.all().delete()
@@ -1471,6 +1843,7 @@ def create_shipping_invoice(request, payload: ShippingInvoiceCreateSchema):
             grade=item.grade,
             brand=item.brand,
             country_of_origin=getattr(item, "country_of_origin", None),
+            country_of_origin=getattr(item, "country_of_origin", None),
         )
 
     return ShippingInvoiceSummarySchema(
@@ -1499,6 +1872,8 @@ def list_shipping_invoices(request, order_number: Optional[str] = None):
                 invoice_date=inv.invoice_date,
                 authorized_by=inv.authorized_by,
                 authorized_at=inv.authorized_at.isoformat() if inv.authorized_at else None,
+                authorized_by=inv.authorized_by,
+                authorized_at=inv.authorized_at.isoformat() if inv.authorized_at else None,
             )
         )
     return result
@@ -1525,6 +1900,8 @@ def get_shipping_invoice_detail(request, invoice_id: uuid.UUID):
         sr_no=invoice.sr_no,
         authorized_by=invoice.authorized_by,
         authorized_at=invoice.authorized_at.isoformat() if invoice.authorized_at else None,
+        authorized_by=invoice.authorized_by,
+        authorized_at=invoice.authorized_at.isoformat() if invoice.authorized_at else None,
         items=[
             ShippingInvoiceItemSchema(
                 item_name=i.item_name,
@@ -1537,6 +1914,7 @@ def get_shipping_invoice_detail(request, invoice_id: uuid.UUID):
                 gross_weight=i.gross_weight,
                 grade=i.grade,
                 brand=i.brand,
+                country_of_origin=i.country_of_origin,
                 country_of_origin=i.country_of_origin,
             )
             for i in invoice.items.all()
@@ -1581,6 +1959,7 @@ def update_shipping_invoice(
             grade=item.grade,
             brand=item.brand,
             country_of_origin=getattr(item, "country_of_origin", None),
+            country_of_origin=getattr(item, "country_of_origin", None),
         )
 
     invoice.refresh_from_db()
@@ -1601,6 +1980,8 @@ def update_shipping_invoice(
         sr_no=invoice.sr_no,
         authorized_by=invoice.authorized_by,
         authorized_at=invoice.authorized_at.isoformat() if invoice.authorized_at else None,
+        authorized_by=invoice.authorized_by,
+        authorized_at=invoice.authorized_at.isoformat() if invoice.authorized_at else None,
         items=[
             ShippingInvoiceItemSchema(
                 item_name=i.item_name,
@@ -1613,6 +1994,7 @@ def update_shipping_invoice(
                 gross_weight=i.gross_weight,
                 grade=i.grade,
                 brand=i.brand,
+                country_of_origin=i.country_of_origin,
                 country_of_origin=i.country_of_origin,
             )
             for i in invoice.items.all()
