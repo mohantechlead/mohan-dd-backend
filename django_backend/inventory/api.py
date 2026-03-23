@@ -547,55 +547,6 @@ def create_grn(request, payload: GrnCreateSchema):
                 bags=bags_val,
             )
             created_items.append(new_item)
-    try:
-        if not payload.date:
-            return JsonResponse(
-                {"detail": "Date is required."},
-                status=400,
-            )
-        grn_no_val = int(payload.grn_no) if str(payload.grn_no).strip().isdigit() else None
-        if grn_no_val is None:
-            return JsonResponse(
-                {"detail": "GRN No must be a valid number."},
-                status=400,
-            )
-        if GRN.objects.filter(grn_no=grn_no_val).exists():
-            return JsonResponse(
-                {"detail": f"GRN No '{payload.grn_no}' already exists."},
-                status=400,
-            )
-
-        grn = GRN.objects.create(
-            id=uuid.uuid4(),
-            supplier_name=payload.supplier_name,
-            grn_no=grn_no_val,
-            plate_no=payload.plate_no,
-            purchase_no=payload.purchase_no,
-            date=payload.date,
-            ECD_no=payload.ECD_no,
-            transporter_name=payload.transporter_name,
-            storekeeper_name=payload.storekeeper_name,
-        )
-
-        created_items = []
-        for item in payload.items:
-            bags_val = None
-            if item.bags is not None and str(item.bags).strip():
-                try:
-                    bags_val = float(item.bags)
-                except (ValueError, TypeError):
-                    pass
-
-            new_item = GrnItems.objects.create(
-                item_id=uuid.uuid4(),
-                grn=grn,
-                item_name=item.item_name,
-                quantity=int(item.quantity) if item.quantity is not None else 0,
-                unit_measurement=item.unit_measurement or "",
-                internal_code=item.internal_code or None,
-                bags=bags_val,
-            )
-            created_items.append(new_item)
 
         _check_and_notify_negative_stock()
 
@@ -607,16 +558,7 @@ def create_grn(request, payload: GrnCreateSchema):
             {"detail": str(e), "message": "Failed to create GRN."},
             status=500,
         )
-        _check_and_notify_negative_stock()
 
-        grn.refresh_from_db()
-        return _grn_to_detail(grn)
-    except Exception as e:
-        logger.exception("GRN create failed: %s", e)
-        return JsonResponse(
-            {"detail": str(e), "message": "Failed to create GRN."},
-            status=500,
-        )
 
 @router.get("/grn", response=List[GRNListSchema])
 def list_GRN(request):
@@ -832,11 +774,7 @@ def create_dn(request, payload: DnCreateSchema):
     _check_and_notify_negative_stock()
     over_items, under_items = _check_and_notify_over_under_delivery(dn)
 
-    _check_and_notify_negative_stock()
-    over_items, under_items = _check_and_notify_over_under_delivery(dn)
-
     # Return structured response
-    result = {
     result = {
         "id": dn.id,
         "customer_name": dn.customer_name,
@@ -847,16 +785,7 @@ def create_dn(request, payload: DnCreateSchema):
             {"item_name": i.item_name, "quantity": i.quantity}
             for i in created_items
         ],
-        "items": [
-            {"item_name": i.item_name, "quantity": i.quantity}
-            for i in created_items
-        ],
     }
-    if over_items:
-        result["over_items"] = over_items
-    if under_items:
-        result["under_items"] = under_items
-    return result
     if over_items:
         result["over_items"] = over_items
     if under_items:
@@ -1843,7 +1772,6 @@ def create_shipping_invoice(request, payload: ShippingInvoiceCreateSchema):
             grade=item.grade,
             brand=item.brand,
             country_of_origin=getattr(item, "country_of_origin", None),
-            country_of_origin=getattr(item, "country_of_origin", None),
         )
 
     return ShippingInvoiceSummarySchema(
@@ -1872,8 +1800,6 @@ def list_shipping_invoices(request, order_number: Optional[str] = None):
                 invoice_date=inv.invoice_date,
                 authorized_by=inv.authorized_by,
                 authorized_at=inv.authorized_at.isoformat() if inv.authorized_at else None,
-                authorized_by=inv.authorized_by,
-                authorized_at=inv.authorized_at.isoformat() if inv.authorized_at else None,
             )
         )
     return result
@@ -1900,8 +1826,6 @@ def get_shipping_invoice_detail(request, invoice_id: uuid.UUID):
         sr_no=invoice.sr_no,
         authorized_by=invoice.authorized_by,
         authorized_at=invoice.authorized_at.isoformat() if invoice.authorized_at else None,
-        authorized_by=invoice.authorized_by,
-        authorized_at=invoice.authorized_at.isoformat() if invoice.authorized_at else None,
         items=[
             ShippingInvoiceItemSchema(
                 item_name=i.item_name,
@@ -1914,7 +1838,6 @@ def get_shipping_invoice_detail(request, invoice_id: uuid.UUID):
                 gross_weight=i.gross_weight,
                 grade=i.grade,
                 brand=i.brand,
-                country_of_origin=i.country_of_origin,
                 country_of_origin=i.country_of_origin,
             )
             for i in invoice.items.all()
@@ -1959,7 +1882,6 @@ def update_shipping_invoice(
             grade=item.grade,
             brand=item.brand,
             country_of_origin=getattr(item, "country_of_origin", None),
-            country_of_origin=getattr(item, "country_of_origin", None),
         )
 
     invoice.refresh_from_db()
@@ -1980,8 +1902,6 @@ def update_shipping_invoice(
         sr_no=invoice.sr_no,
         authorized_by=invoice.authorized_by,
         authorized_at=invoice.authorized_at.isoformat() if invoice.authorized_at else None,
-        authorized_by=invoice.authorized_by,
-        authorized_at=invoice.authorized_at.isoformat() if invoice.authorized_at else None,
         items=[
             ShippingInvoiceItemSchema(
                 item_name=i.item_name,
@@ -1994,7 +1914,6 @@ def update_shipping_invoice(
                 gross_weight=i.gross_weight,
                 grade=i.grade,
                 brand=i.brand,
-                country_of_origin=i.country_of_origin,
                 country_of_origin=i.country_of_origin,
             )
             for i in invoice.items.all()
