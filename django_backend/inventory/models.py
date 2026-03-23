@@ -167,6 +167,8 @@ class ShippingInvoice(models.Model):
     waybill_remark = models.TextField(blank=True, null=True)
     bill_of_lading_remark = models.TextField(blank=True, null=True)
     sr_no = models.PositiveIntegerField(blank=True, null=True)
+    authorized_by = models.CharField(max_length=255, blank=True, null=True)
+    authorized_at = models.DateTimeField(blank=True, null=True)
 
     def __str__(self):
         return f"{self.invoice_number} ({self.order.order_number})"
@@ -185,9 +187,11 @@ class ShippingInvoiceItem(models.Model):
     gross_weight = models.FloatField(blank=True, null=True)
     grade = models.CharField(max_length=255, blank=True, null=True)
     brand = models.CharField(max_length=255, blank=True, null=True)
+    country_of_origin = models.CharField(max_length=255, blank=True, null=True)
 
     def __str__(self):
         return f"{self.invoice.invoice_number} - {self.item_name}"
+
 
 class Purchase(models.Model):
     id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True, primary_key=True)

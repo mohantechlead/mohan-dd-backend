@@ -23,8 +23,8 @@ class Command(BaseCommand):
         )
         parser.add_argument(
             "--role",
-            default="viewer",
-            help="Role for the seeded user (default: viewer)",
+            default="logistics",
+            help="Role for the seeded user (default: logistics)",
         )
         parser.add_argument(
             "--superuser",

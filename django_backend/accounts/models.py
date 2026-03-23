@@ -8,10 +8,11 @@ class User(AbstractUser):
         ("sales", "Sales"),
         ("purchasing", "Purchasing"),
         ("inventory", "Inventory"),
-        ("viewer", "Viewer"),
+        ("logistics", "Logistics"),
+        ("store", "Store"),
     )
 
-    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default="viewer")
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default="logistics")
 
     def __str__(self):
         return f"{self.username} ({self.role})"

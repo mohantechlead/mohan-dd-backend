@@ -19,9 +19,9 @@ class GrnCreateSchema(Schema):
     plate_no: str
     purchase_no: str
     date: date
-    ECD_no: str
-    transporter_name: str
-    storekeeper_name: str 
+    ECD_no: str = ""
+    transporter_name: str = ""
+    storekeeper_name: str = ""
     items: List[GrnItemCreateSchema]
 
 # Response schema
@@ -83,12 +83,21 @@ class DnItemSchema(Schema):
     item_name: str
     quantity: int
     
+class OverUnderItemSchema(Schema):
+    item_name: str
+    invoiced: int
+    delivered: int
+    variance: int
+
+
 class DnDetailSchema(Schema):
     id: uuid.UUID | None = None
     customer_name: str
     dn_no: str
     sales_no: str
     items: Optional[List[DnItemSchema]] = []
+    over_items: Optional[List[OverUnderItemSchema]] = None
+    under_items: Optional[List[OverUnderItemSchema]] = None
 
 
 class DnUpdateSchema(Schema):
@@ -220,6 +229,7 @@ class OrderUpdateSchema(Schema):
     freight: str
     freight_price: Optional[float]
     shipment_type: str
+    items: Optional[List[OrderItemCreateSchema]] = None
 
 class OrderApproveSchema(Schema):
     approved_by_id: int
@@ -350,6 +360,7 @@ class ShippingInvoiceItemCreateSchema(Schema):
     gross_weight: Optional[float]
     grade: Optional[str] = None
     brand: Optional[str] = None
+    country_of_origin: Optional[str] = None
 
 
 class ShippingInvoiceCreateSchema(Schema):
@@ -387,6 +398,8 @@ class ShippingInvoiceSummarySchema(Schema):
     invoice_number: str
     order_number: str
     invoice_date: date
+    authorized_by: Optional[str] = None
+    authorized_at: Optional[str] = None
 
 
 class ShippingInvoiceItemSchema(Schema):
@@ -400,6 +413,7 @@ class ShippingInvoiceItemSchema(Schema):
     gross_weight: Optional[float]
     grade: Optional[str] = None
     brand: Optional[str] = None
+    country_of_origin: Optional[str] = None
 
 
 class ShippingInvoiceDetailSchema(Schema):
@@ -416,4 +430,6 @@ class ShippingInvoiceDetailSchema(Schema):
     waybill_remark: Optional[str]
     bill_of_lading_remark: Optional[str]
     sr_no: Optional[int] = None
+    authorized_by: Optional[str] = None
+    authorized_at: Optional[str] = None
     items: List[ShippingInvoiceItemSchema]

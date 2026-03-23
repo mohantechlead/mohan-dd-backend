@@ -4,6 +4,11 @@ from pathlib import Path
 from datetime import timedelta
 import os
 
+try:
+    import django_heroku
+except ImportError:
+    django_heroku = None
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # ==============================
@@ -168,6 +173,16 @@ USE_I18N = True
 USE_TZ = True
 
 # ==============================
+# Session
+# ==============================
+
+SESSION_COOKIE_AGE = 1800  # 30 minutes
+SESSION_EXPIRE_AT_BROWSER_CLOSE = True
+SESSION_SAVE_EVERY_REQUEST = True
+
+LOGOUT_REDIRECT_URL = "login_user"
+
+# ==============================
 # Static / Media
 # ==============================
 
@@ -184,6 +199,50 @@ MEDIA_ROOT = BASE_DIR / "media"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 # ==============================
+# Email
+# ==============================
+
+EMAIL_BACKEND = os.environ.get(
+    "EMAIL_BACKEND", "django.core.mail.backends.smtp.EmailBackend"
+)
+EMAIL_HOST = os.environ.get("EMAIL_HOST", "smtp.gmail.com")
+EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "tech@mohanplc.com")
+EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "llcbqsjcpgyzbqvc")
+EMAIL_PORT = int(os.environ.get("EMAIL_PORT", "587"))
+EMAIL_USE_TLS = True
+EMAIL_TIMEOUT = 30
+DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
+
+# Recipients for over/under delivery notifications (comma-separated emails)
+OVER_UNDER_DELIVERY_RECIPIENTS = [
+    r.strip()
+    for r in os.environ.get(
+        "OVER_UNDER_DELIVERY_RECIPIENTS",
+        "sol@mohanplc.com,Kapil@mohanint.com,Harsh@mohanplc.com,Mayuraddis@gmail.com,Amritakaur2612@gmail.com",
+    ).split(",")
+    if r.strip()
+]
+
+# For testing: set EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend
+# to print emails to console instead of sending
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {
+        "console": {
+            "class": "logging.StreamHandler",
+        },
+    },
+    "loggers": {
+        "inventory": {
+            "handlers": ["console"],
+            "level": "INFO",
+        },
+    },
+}
+
+# ==============================
 # Ninja JWT
 # ==============================
 
@@ -191,3 +250,10 @@ NINJA_JWT = {
     "ACCESS_TOKEN_LIFETIME": datetime.timedelta(minutes=60),
     "REFRESH_TOKEN_LIFETIME": datetime.timedelta(days=7),
 }
+
+# ==============================
+# Heroku (when deployed)
+# ==============================
+
+if django_heroku:
+    django_heroku.settings(locals())

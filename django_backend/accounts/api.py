@@ -13,7 +13,7 @@ router = Router()
 
 User = get_user_model()
 
-ROLE_CHOICES = ["admin", "sales", "purchasing", "inventory", "viewer"]
+ROLE_CHOICES = ["admin", "sales", "purchasing", "inventory", "logistics", "store"]
 
 
 def _require_admin(request):
@@ -21,7 +21,7 @@ def _require_admin(request):
     user = getattr(request, "user", None)
     if not user or not user.is_authenticated:
         return JsonResponse({"detail": "Authentication required."}, status=401)
-    role = getattr(user, "role", "viewer")
+    role = getattr(user, "role", "logistics")
     if role != "admin" and not getattr(user, "is_superuser", False):
         return JsonResponse({"detail": "Admin role required."}, status=403)
     return None
@@ -39,7 +39,7 @@ class UserCreateSchema(Schema):
     username: str
     password: str
     email: str = ""
-    role: str = "viewer"
+    role: str = "logistics"
 
 
 class UserUpdateSchema(Schema):
