@@ -1,3 +1,4 @@
+import html
 import logging
 from ninja import Router
 from typing import List, Optional
@@ -1637,25 +1638,122 @@ def authorize_shipping_invoice(request, invoice_id: uuid.UUID):
             if invoice.authorized_at
             else ""
         )
+        invoice_date_str = (
+            invoice.invoice_date.strftime("%Y-%m-%d")
+            if invoice.invoice_date
+            else ""
+        )
+        customer_name = invoice.order.buyer or ""
+        items_lines = "\n".join(
+            f"  - {i.item_name}: {i.quantity}"
+            for i in invoice.items.all()
+        )
+        recipient_list = [
+            "mekdi1610@gmail.com",
+        ]
+        frontend_base = getattr(settings, "FRONTEND_BASE_URL", "http://localhost:3000")
+        view_url = f"{frontend_base.rstrip('/')}/diredawa/orders/{invoice.order.order_number}/loading-instruction?invoiceId={invoice.id}"
+
+        # Plain text fallback
+        plain_message = (
+            f"LOADING INSTRUCTION AUTHORIZED\n"
+            f"{'=' * 40}\n\n"
+            f"A loading instruction has been authorized and is ready for use.\n\n"
+            f"ORDER DETAILS\n"
+            f"  Invoice Number:       {invoice.invoice_number}\n"
+            f"  Order Number:         {invoice.order.order_number}\n"
+            f"  Customer Order No:    {invoice.customer_order_number}\n"
+            f"  Customer Name:        {customer_name}\n"
+            f"  Invoice Date:         {invoice_date_str}\n"
+            f"  Waybill Number:       {invoice.waybill_number or '—'}\n"
+            f"  Container Number:     {invoice.container_number or '—'}\n"
+            f"  Vessel:               {invoice.vessel or '—'}\n\n"
+            f"ITEMS ({invoice.items.count()} line(s))\n"
+            f"{items_lines}\n\n"
+            f"AUTHORIZATION\n"
+            f"  Authorized by:        {authorized_by}\n"
+            f"  Authorized at:        {authorized_at_str}\n\n"
+            f"View in system: {view_url}\n"
+        )
+
+        # HTML email (escape user content for safety)
+        def _esc(s):
+            return html.escape(str(s) if s is not None else "")
+
+        items_rows = "".join(
+            f"""
+            <tr>
+                <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;">{_esc(i.item_name)}</td>
+                <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:right;">{_esc(i.quantity)}</td>
+                <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;">{_esc(i.measurement or '—')}</td>
+            </tr>"""
+            for i in invoice.items.all()
+        )
+        html_message = f"""
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Loading Instruction Authorized</title>
+</head>
+<body style="margin:0;font-family:Arial,sans-serif;background-color:#f4f4f5;padding:24px;">
+  <div style="max-width:600px;margin:0 auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.08);">
+    <div style="background:linear-gradient(135deg,#2563eb 0%,#1d4ed8 100%);color:#fff;padding:20px 24px;">
+      <h1 style="margin:0;font-size:20px;font-weight:600;">Loading Instruction Authorized</h1>
+      <p style="margin:8px 0 0;font-size:14px;opacity:0.95;">Invoice #{_esc(invoice.invoice_number)}</p>
+    </div>
+    <div style="padding:24px;">
+      <p style="margin:0 0 16px;color:#374151;font-size:15px;line-height:1.5;">
+        A loading instruction has been authorized and is ready for use.
+      </p>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:20px;font-size:14px;">
+        <tr><td style="padding:6px 0;color:#6b7280;width:45%;">Invoice Number</td><td style="padding:6px 0;color:#111827;font-weight:500;">{_esc(invoice.invoice_number)}</td></tr>
+        <tr><td style="padding:6px 0;color:#6b7280;">Order Number</td><td style="padding:6px 0;color:#111827;font-weight:500;">{_esc(invoice.order.order_number)}</td></tr>
+        <tr><td style="padding:6px 0;color:#6b7280;">Customer Order No</td><td style="padding:6px 0;color:#111827;">{_esc(invoice.customer_order_number)}</td></tr>
+        <tr><td style="padding:6px 0;color:#6b7280;">Customer Name</td><td style="padding:6px 0;color:#111827;">{_esc(customer_name or '—')}</td></tr>
+        <tr><td style="padding:6px 0;color:#6b7280;">Invoice Date</td><td style="padding:6px 0;color:#111827;">{_esc(invoice_date_str)}</td></tr>
+        <tr><td style="padding:6px 0;color:#6b7280;">Waybill Number</td><td style="padding:6px 0;color:#111827;">{_esc(invoice.waybill_number or '—')}</td></tr>
+        <tr><td style="padding:6px 0;color:#6b7280;">Container Number</td><td style="padding:6px 0;color:#111827;">{_esc(invoice.container_number or '—')}</td></tr>
+        <tr><td style="padding:6px 0;color:#6b7280;">Vessel</td><td style="padding:6px 0;color:#111827;">{_esc(invoice.vessel or '—')}</td></tr>
+      </table>
+      <h3 style="margin:0 0 12px;font-size:14px;color:#374151;">Items ({invoice.items.count()} line(s))</h3>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;border:1px solid #e5e7eb;border-radius:6px;">
+        <thead>
+          <tr style="background:#f9fafb;">
+            <th style="padding:10px 12px;text-align:left;font-weight:600;color:#374151;">Item</th>
+            <th style="padding:10px 12px;text-align:right;font-weight:600;color:#374151;">Qty</th>
+            <th style="padding:10px 12px;text-align:left;font-weight:600;color:#374151;">Measurement</th>
+          </tr>
+        </thead>
+        <tbody>{items_rows}
+        </tbody>
+      </table>
+      <div style="margin-top:20px;padding:16px;background:#f0fdf4;border-radius:6px;border:1px solid #bbf7d0;">
+        <p style="margin:0 0 8px;font-size:13px;color:#166534;font-weight:600;">Authorization Details</p>
+        <p style="margin:0;font-size:14px;color:#374151;">
+          <strong>Authorized by:</strong> {_esc(authorized_by)} &nbsp;|&nbsp;
+          <strong>Authorized at:</strong> {_esc(authorized_at_str)}
+        </p>
+      </div>
+      <p style="margin:24px 0 0;text-align:center;">
+        <a href="{view_url}" style="display:inline-block;background:#2563eb;color:#fff;text-decoration:none;padding:12px 24px;border-radius:6px;font-size:14px;font-weight:500;">View Loading Instruction</a>
+      </p>
+    </div>
+    <div style="padding:12px 24px;background:#f9fafb;font-size:12px;color:#6b7280;text-align:center;">
+      This is an automated notification from the Mohan loading instruction system.
+    </div>
+  </div>
+</body>
+</html>
+"""
         sent = send_mail(
-            subject=f"Loading Instruction Authorized - {invoice.invoice_number}",
-            message=(
-                f"Loading Instruction has been authorized.\n\n"
-                f"Invoice Number: {invoice.invoice_number}\n"
-                f"Order Number: {invoice.order.order_number}\n"
-                f"Customer Order Number: {invoice.customer_order_number}\n"
-                f"Authorized by: {authorized_by}\n"
-                f"Authorized at: {authorized_at_str}\n"
-            ),
+            subject=f"Loading Instruction Authorized – Invoice #{invoice.invoice_number} (Order {invoice.order.order_number})",
+            message=plain_message,
             from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[
-                "sol@mohanplc.com",
-                "Kapil@mohanint.com",
-                "Harsh@mohanplc.com",
-                "Mayuraddis@gmail.com",
-                "Amritakaur2612@gmail.com",
-            ],
+            recipient_list=recipient_list,
             fail_silently=True,
+            html_message=html_message,
         )
         if sent == 0:
             logger.warning("Email sent count was 0 for authorize notification")
