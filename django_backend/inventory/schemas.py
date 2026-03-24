@@ -28,7 +28,10 @@ class GrnCreateSchema(Schema):
 class GrnItemSchema(Schema):
     item_name: str
     quantity: int
-    
+    unit_measurement: Optional[str] = None
+    internal_code: Optional[str] = None
+    bags: Optional[float] = None
+
 
 class GrnDetailSchema(Schema):
     id: uuid.UUID
@@ -36,6 +39,10 @@ class GrnDetailSchema(Schema):
     grn_no: str
     plate_no: str
     purchase_no: str
+    date: Optional[str] = None
+    ECD_no: Optional[str] = None
+    transporter_name: Optional[str] = None
+    storekeeper_name: Optional[str] = None
     items: List[GrnItemSchema]
 
 
@@ -82,7 +89,9 @@ class DnCreateSchema(Schema):
 class DnItemSchema(Schema):
     item_name: str
     quantity: int
-    
+    unit_measurement: Optional[str] = None
+
+
 class OverUnderItemSchema(Schema):
     item_name: str
     invoiced: int
@@ -95,6 +104,14 @@ class DnDetailSchema(Schema):
     customer_name: str
     dn_no: str
     sales_no: str
+    plate_no: Optional[str] = None
+    date: Optional[str] = None
+    ECD_no: Optional[str] = None
+    invoice_no: Optional[str] = None
+    gatepass_no: Optional[str] = None
+    despathcher_name: Optional[str] = None
+    receiver_name: Optional[str] = None
+    authorized_by: Optional[str] = None
     items: Optional[List[DnItemSchema]] = []
     over_items: Optional[List[OverUnderItemSchema]] = None
     under_items: Optional[List[OverUnderItemSchema]] = None

@@ -173,87 +173,28 @@ def _check_and_notify_negative_stock():
 
 def _check_and_notify_over_under_delivery(dn):
     """
-    Compare DN total delivered quantities vs Invoice (ShippingInvoice) quantities for sales_no.
-    Uses the invoice linked by dn.invoice_no when present; otherwise skips.
-    Send email if any item has over delivery (delivered > invoiced) or under delivery (delivered < invoiced).
+    Compare DN total delivered quantities vs Invoice. Send email if variances exist.
     Returns (over_items, under_items) for API response.
     """
-    over_items = []
-    under_items = []
+    over_items, under_items = _get_over_under_delivery(dn)
+    if not over_items and not under_items:
+        return over_items, under_items
     try:
         invoice_no = (dn.invoice_no or "").strip()
-        if not invoice_no:
-            logger.info(
-                "Over/under delivery check skipped: no invoice_no on DN %s (sales_no=%s)",
-                dn.dn_no,
-                dn.sales_no,
-            )
-            return over_items, under_items
-
-        order = Order.objects.filter(order_number=dn.sales_no).first()
-        if not order:
-            logger.info(
-                "Over/under delivery check skipped: no Order found with order_number=%s (DN %s)",
-                dn.sales_no,
-                dn.dn_no,
-            )
-            return over_items, under_items
-
-        invoice = ShippingInvoice.objects.filter(
-            order=order,
-            invoice_number__iexact=invoice_no,
-        ).prefetch_related("items").first()
-
-        if not invoice:
-            logger.info(
-                "Over/under delivery check skipped: no ShippingInvoice found with invoice_number=%s for order %s (DN %s)",
-                invoice_no,
-                dn.sales_no,
-                dn.dn_no,
-            )
-            return over_items, under_items
-
-        # Aggregate invoice quantities by item_name (invoice can have same item on multiple lines)
-        invoiced_by_item = {}
-        for inv_item in invoice.items.all():
-            name = inv_item.item_name
-            qty = int(inv_item.quantity)
-            invoiced_by_item[name] = invoiced_by_item.get(name, 0) + qty
-
-        # Compare total invoiced vs total delivered per item
-        for item_name, total_invoiced in invoiced_by_item.items():
-            total_delivered = DNItems.objects.filter(
-                dn__sales_no=dn.sales_no,
-                item_name=item_name,
-            ).aggregate(total=Sum("quantity"))["total"] or 0
-
-            if total_delivered > total_invoiced:
-                over_items.append({
-                    "item_name": item_name,
-                    "invoiced": total_invoiced,
-                    "delivered": total_delivered,
-                    "variance": total_delivered - total_invoiced,
-                })
-            elif total_delivered < total_invoiced:
-                under_items.append({
-                    "item_name": item_name,
-                    "invoiced": total_invoiced,
-                    "delivered": total_delivered,
-                    "variance": total_invoiced - total_delivered,
-                })
-
-        if not over_items and not under_items:
-            logger.info(
-                "Over/under delivery check: no variance for DN %s (sales_no=%s) - all quantities match invoice",
-                dn.dn_no,
-                dn.sales_no,
-            )
-            return over_items, under_items
-
+        invoice_num = invoice_no or "N/A"
+        if invoice_no:
+            order = Order.objects.filter(order_number=dn.sales_no).first()
+            if order:
+                inv = ShippingInvoice.objects.filter(
+                    order=order,
+                    invoice_number__iexact=invoice_no,
+                ).first()
+                if inv:
+                    invoice_num = inv.invoice_number
         lines = [
             f"Delivery Note: {dn.dn_no}",
             f"Order/Sales No: {dn.sales_no}",
-            f"Invoice: {invoice.invoice_number}",
+            f"Invoice: {invoice_num}",
             f"Customer: {dn.customer_name}",
             "",
         ]
@@ -295,6 +236,55 @@ def _check_and_notify_over_under_delivery(dn):
     except Exception as e:
         logger.exception("Failed to send over/under delivery notification: %s", e)
 
+    return over_items, under_items
+
+
+def _get_over_under_delivery(dn):
+    """
+    Compute over/under delivery variances vs invoice. Does NOT send email.
+    Returns (over_items, under_items) for display (e.g. GET DN detail).
+    """
+    over_items = []
+    under_items = []
+    try:
+        invoice_no = (dn.invoice_no or "").strip()
+        if not invoice_no:
+            return over_items, under_items
+        order = Order.objects.filter(order_number=dn.sales_no).first()
+        if not order:
+            return over_items, under_items
+        invoice = ShippingInvoice.objects.filter(
+            order=order,
+            invoice_number__iexact=invoice_no,
+        ).prefetch_related("items").first()
+        if not invoice:
+            return over_items, under_items
+        invoiced_by_item = {}
+        for inv_item in invoice.items.all():
+            name = inv_item.item_name
+            qty = int(inv_item.quantity)
+            invoiced_by_item[name] = invoiced_by_item.get(name, 0) + qty
+        for item_name, total_invoiced in invoiced_by_item.items():
+            total_delivered = DNItems.objects.filter(
+                dn__sales_no=dn.sales_no,
+                item_name=item_name,
+            ).aggregate(total=Sum("quantity"))["total"] or 0
+            if total_delivered > total_invoiced:
+                over_items.append({
+                    "item_name": item_name,
+                    "invoiced": total_invoiced,
+                    "delivered": total_delivered,
+                    "variance": total_delivered - total_invoiced,
+                })
+            elif total_delivered < total_invoiced:
+                under_items.append({
+                    "item_name": item_name,
+                    "invoiced": total_invoiced,
+                    "delivered": total_delivered,
+                    "variance": total_invoiced - total_delivered,
+                })
+    except Exception as e:
+        logger.exception("Over/under delivery compute failed: %s", e)
     return over_items, under_items
 
 
@@ -367,133 +357,6 @@ def _check_and_notify_negative_stock():
             logger.warning("Negative stock alert email sent count was 0")
     except Exception as e:
         logger.exception("Failed to send negative stock alert email: %s", e)
-
-
-def _check_and_notify_over_under_delivery(dn):
-    """
-    Compare DN total delivered quantities vs Invoice (ShippingInvoice) quantities for sales_no.
-    Uses the invoice linked by dn.invoice_no when present; otherwise skips.
-    Send email if any item has over delivery (delivered > invoiced) or under delivery (delivered < invoiced).
-    Returns (over_items, under_items) for API response.
-    """
-    over_items = []
-    under_items = []
-    try:
-        invoice_no = (dn.invoice_no or "").strip()
-        if not invoice_no:
-            logger.info(
-                "Over/under delivery check skipped: no invoice_no on DN %s (sales_no=%s)",
-                dn.dn_no,
-                dn.sales_no,
-            )
-            return over_items, under_items
-
-        order = Order.objects.filter(order_number=dn.sales_no).first()
-        if not order:
-            logger.info(
-                "Over/under delivery check skipped: no Order found with order_number=%s (DN %s)",
-                dn.sales_no,
-                dn.dn_no,
-            )
-            return over_items, under_items
-
-        invoice = ShippingInvoice.objects.filter(
-            order=order,
-            invoice_number__iexact=invoice_no,
-        ).prefetch_related("items").first()
-
-        if not invoice:
-            logger.info(
-                "Over/under delivery check skipped: no ShippingInvoice found with invoice_number=%s for order %s (DN %s)",
-                invoice_no,
-                dn.sales_no,
-                dn.dn_no,
-            )
-            return over_items, under_items
-
-        # Aggregate invoice quantities by item_name (invoice can have same item on multiple lines)
-        invoiced_by_item = {}
-        for inv_item in invoice.items.all():
-            name = inv_item.item_name
-            qty = int(inv_item.quantity)
-            invoiced_by_item[name] = invoiced_by_item.get(name, 0) + qty
-
-        # Compare total invoiced vs total delivered per item
-        for item_name, total_invoiced in invoiced_by_item.items():
-            total_delivered = DNItems.objects.filter(
-                dn__sales_no=dn.sales_no,
-                item_name=item_name,
-            ).aggregate(total=Sum("quantity"))["total"] or 0
-
-            if total_delivered > total_invoiced:
-                over_items.append({
-                    "item_name": item_name,
-                    "invoiced": total_invoiced,
-                    "delivered": total_delivered,
-                    "variance": total_delivered - total_invoiced,
-                })
-            elif total_delivered < total_invoiced:
-                under_items.append({
-                    "item_name": item_name,
-                    "invoiced": total_invoiced,
-                    "delivered": total_delivered,
-                    "variance": total_invoiced - total_delivered,
-                })
-
-        if not over_items and not under_items:
-            logger.info(
-                "Over/under delivery check: no variance for DN %s (sales_no=%s) - all quantities match invoice",
-                dn.dn_no,
-                dn.sales_no,
-            )
-            return over_items, under_items
-
-        lines = [
-            f"Delivery Note: {dn.dn_no}",
-            f"Order/Sales No: {dn.sales_no}",
-            f"Invoice: {invoice.invoice_number}",
-            f"Customer: {dn.customer_name}",
-            "",
-        ]
-
-        if over_items:
-            lines.append("OVER DELIVERY:")
-            for it in over_items:
-                lines.append(
-                    f"  - {it['item_name']}: invoiced={it['invoiced']}, delivered={it['delivered']} "
-                    f"(over by {it['variance']})"
-                )
-            lines.append("")
-
-        if under_items:
-            lines.append("UNDER DELIVERY:")
-            for it in under_items:
-                lines.append(
-                    f"  - {it['item_name']}: invoiced={it['invoiced']}, delivered={it['delivered']} "
-                    f"(short by {it['variance']})"
-                )
-
-        message = "\n".join(lines)
-        subject = "Over/Under Delivery Notification"
-
-        recipient_list = getattr(settings, "OVER_UNDER_DELIVERY_RECIPIENTS", [])
-
-        if recipient_list:
-            sent = send_mail(
-                subject=subject,
-                message=message,
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                recipient_list=recipient_list,
-                fail_silently=True,
-            )
-            if sent > 0:
-                logger.info("Over/under delivery notification sent to %s", recipient_list)
-            else:
-                logger.warning("Over/under delivery email sent count was 0")
-    except Exception as e:
-        logger.exception("Failed to send over/under delivery notification: %s", e)
-
-    return over_items, under_items
 
 
 @router.post("/grn", response=GrnDetailSchema)
@@ -651,10 +514,20 @@ def _grn_to_detail(grn):
         "id": grn.id,
         "supplier_name": grn.supplier_name,
         "grn_no": str(grn.grn_no),
-        "plate_no": grn.plate_no,
+        "plate_no": grn.plate_no or "",
         "purchase_no": grn.purchase_no,
+        "date": grn.date.isoformat() if grn.date else None,
+        "ECD_no": grn.ECD_no,
+        "transporter_name": grn.transporter_name,
+        "storekeeper_name": grn.storekeeper_name,
         "items": [
-            {"item_name": item.item_name, "quantity": item.quantity}
+            {
+                "item_name": item.item_name,
+                "quantity": item.quantity,
+                "unit_measurement": item.unit_measurement,
+                "internal_code": item.internal_code,
+                "bags": float(item.bags) if item.bags is not None else None,
+            }
             for item in grn.items.all()
         ],
     }
@@ -795,8 +668,14 @@ def create_dn(request, payload: DnCreateSchema):
 
 @router.get("/dn/{dn_no}", response=DnDetailSchema)
 def get_DN(request, dn_no: str):
-    dn = get_object_or_404(DN, dn_no=dn_no)
-    return _dn_to_detail(dn)
+    dn = get_object_or_404(DN.objects.prefetch_related("dn_items"), dn_no=dn_no)
+    result = _dn_to_detail(dn)
+    over_items, under_items = _get_over_under_delivery(dn)
+    if over_items:
+        result["over_items"] = over_items
+    if under_items:
+        result["under_items"] = under_items
+    return result
 
 
 @router.put("/dn/{dn_no}", response=DnDetailSchema, auth=JWTAuth())
@@ -939,8 +818,20 @@ def _dn_to_detail(dn):
         "customer_name": dn.customer_name,
         "dn_no": dn.dn_no,
         "sales_no": dn.sales_no,
+        "plate_no": dn.plate_no or "",
+        "date": dn.date.isoformat() if dn.date else None,
+        "ECD_no": dn.ECD_no,
+        "invoice_no": dn.invoice_no,
+        "gatepass_no": dn.gatepass_no,
+        "despathcher_name": dn.despathcher_name,
+        "receiver_name": dn.receiver_name,
+        "authorized_by": dn.authorized_by,
         "items": [
-            {"item_name": item.item_name, "quantity": item.quantity}
+            {
+                "item_name": item.item_name,
+                "quantity": item.quantity,
+                "unit_measurement": item.unit_measurement,
+            }
             for item in dn.dn_items.all()
         ],
     }
