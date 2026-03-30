@@ -1288,7 +1288,8 @@ def create_order(request, payload: OrderCreateSchema):
 
 @router.get("/orders", response=List[OrderDetailSchema])
 def list_orders(request):
-    orders = Order.objects.prefetch_related("items").all()
+    # Sort newest orders first by order number (descending).
+    orders = Order.objects.prefetch_related("items").order_by("-order_number")
     result: list[OrderDetailSchema] = []
     for o in orders:
         result.append(
@@ -1937,7 +1938,8 @@ def update_purchase_status(request, purchase_number: str, payload: PurchaseStatu
 
 @router.get("/purchases", response=List[PurchaseDetailSchema])
 def list_purchases(request):
-    purchases = Purchase.objects.prefetch_related("items").all()
+    # Sort newest purchases first by purchase/order number (descending).
+    purchases = Purchase.objects.prefetch_related("items").order_by("-purchase_number")
     result: list[PurchaseDetailSchema] = []
     for p in purchases:
         result.append(_purchase_to_detail_schema(p))
