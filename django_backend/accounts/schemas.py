@@ -31,7 +31,7 @@ class CustomerUpdateSchema(Schema):
     comments: str | None = None
 
 class CustomerListSchema(Schema):
-    id: uuid.UUID = Field(alias="partnerid")
+    id: uuid.UUID
     name: str
     email: str | None
     phone: str | None
@@ -42,7 +42,7 @@ class CustomerListSchema(Schema):
     comments: str | None = None
 
 class CustomerDetailSchema(Schema):
-    id: uuid.UUID = Field(alias="partnerid")
+    id: uuid.UUID
     name: str
     email: str | None
     phone: str | None
@@ -73,7 +73,7 @@ class SupplierUpdateSchema(Schema):
     comments: str | None = None
 
 class SupplierListSchema(Schema):
-    id: uuid.UUID = Field(alias="partnerid")
+    id: uuid.UUID
     name: str
     email: str | None
     phone: str | None
@@ -84,7 +84,7 @@ class SupplierListSchema(Schema):
     comments: str | None = None
 
 class SupplierDetailSchema(Schema):
-    id: uuid.UUID = Field(alias="partnerid")
+    id: uuid.UUID
     name: str
     email: str | None
     phone: str | None
