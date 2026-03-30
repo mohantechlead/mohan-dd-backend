@@ -7,12 +7,19 @@ class GRN(models.Model):
     id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True, primary_key=True)
     supplier_name = models.CharField(max_length=255)
     grn_no = models.IntegerField(unique=True)
-    plate_no = models.CharField(max_length=255)
+    # Renamed from plate_no -> truck_no
+    truck_no = models.CharField(max_length=255, blank=True, null=True)
+
+    # Existing denormalized purchase identifier (kept for backwards compatibility with existing frontend/code)
     purchase_no = models.CharField(max_length=255)
+
+    received_from = models.CharField(max_length=255, blank=True, null=True)
+    total_quantity = models.IntegerField(default=0)
+    store_name = models.CharField(max_length=255, blank=True, null=True)
+    store_keeper = models.CharField(max_length=255, blank=True, null=True)
     date = models.DateField(null=False, blank=False, auto_now = True)
     ECD_no = models.CharField(max_length=255, blank=True, null=True)
     transporter_name = models.CharField(max_length=255, blank=True, null=True)
-    storekeeper_name = models.CharField(max_length=255, blank=True, null=True)
 
     def __str__(self):
         return f"{self.grn_no} ({self.supplier_name})"
@@ -21,8 +28,9 @@ class GRN(models.Model):
         ordering = ['grn_no'] 
 
 class GrnItems(models.Model):
-    item_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    item_id = models.UUIDField(default=uuid.uuid4, editable=False)
     grn = models.ForeignKey(GRN, on_delete=models.CASCADE, related_name='items')
+    grn_no = models.IntegerField(blank=True, null=True, db_index=True)
     item_name = models.CharField(max_length=255)
     quantity = models.IntegerField()
     unit_measurement = models.CharField(max_length=100)
@@ -102,12 +110,16 @@ class Order(models.Model):
     final_destination = models.CharField(max_length=255)
     port_of_loading = models.CharField(max_length=255)
     port_of_discharge = models.CharField(max_length=255)
-    measurement_type = models.CharField(max_length=50)
+    measurement_type = models.CharField(max_length=50, blank=True, null=True)
     payment_terms = models.CharField(max_length=100)
     mode_of_transport = models.CharField(max_length=50)
-    freight = models.CharField(max_length=50)
+    freight = models.CharField(max_length=50, blank=True, null=True)
     freight_price = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
     shipment_type = models.CharField(max_length=50)
+    # Sales aggregates: PR_before_VAT = sum(line total_price); remaining mirrors total_quantity for now.
+    PR_before_VAT = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    total_quantity = models.IntegerField(default=0)
+    remaining = models.IntegerField(default=0)
     status = models.CharField(max_length=20, default="pending")
     approved_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -140,13 +152,15 @@ class Order(models.Model):
 
 
 class OrderItem(models.Model):
-    item_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    item_id = models.UUIDField(default=uuid.uuid4, editable=False)
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="items")
+    order_no = models.CharField(max_length=255, blank=True, null=True, db_index=True)
     item_name = models.CharField(max_length=255)
     hs_code = models.CharField(max_length=255)
     price = models.DecimalField(max_digits=12, decimal_places=2)
     quantity = models.IntegerField()
     total_price = models.DecimalField(max_digits=12, decimal_places=2)
+    before_vat = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     measurement = models.CharField(max_length=100)
 
     def __str__(self):
@@ -162,6 +176,12 @@ class ShippingInvoice(models.Model):
     customer_order_number = models.CharField(max_length=255)
     container_number = models.CharField(max_length=255, blank=True, null=True)
     vessel = models.CharField(max_length=255, blank=True, null=True)
+    freight_amount = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
+    reference_no = models.CharField(max_length=255, blank=True, null=True)
+    total_bags = models.FloatField(blank=True, null=True)
+    total_net_weight = models.FloatField(blank=True, null=True)
+    total_gross_weight = models.FloatField(blank=True, null=True)
+    final_price = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
     invoice_remark = models.TextField(blank=True, null=True)
     packing_list_remark = models.TextField(blank=True, null=True)
     waybill_remark = models.TextField(blank=True, null=True)
@@ -177,6 +197,7 @@ class ShippingInvoice(models.Model):
 class ShippingInvoiceItem(models.Model):
     id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True, primary_key=True)
     invoice = models.ForeignKey(ShippingInvoice, on_delete=models.CASCADE, related_name="items")
+    item_id = models.UUIDField(blank=True, null=True, db_index=True)
     item_name = models.CharField(max_length=255)
     price = models.DecimalField(max_digits=12, decimal_places=2)
     quantity = models.IntegerField()
@@ -185,6 +206,7 @@ class ShippingInvoiceItem(models.Model):
     bags = models.FloatField(blank=True, null=True)
     net_weight = models.FloatField(blank=True, null=True)
     gross_weight = models.FloatField(blank=True, null=True)
+    hscode = models.CharField(max_length=255, blank=True, null=True)
     grade = models.CharField(max_length=255, blank=True, null=True)
     brand = models.CharField(max_length=255, blank=True, null=True)
     country_of_origin = models.CharField(max_length=255, blank=True, null=True)
@@ -208,13 +230,17 @@ class Purchase(models.Model):
     conditions = models.CharField(max_length=255, blank=True, null=True)
     port_of_loading = models.CharField(max_length=255)
     port_of_discharge = models.CharField(max_length=255)
-    measurement_type = models.CharField(max_length=50)
+    measurement_type = models.CharField(max_length=50, blank=True, null=True)
     payment_terms = models.CharField(max_length=100)
     mode_of_transport = models.CharField(max_length=50)
-    freight = models.CharField(max_length=50)
+    freight = models.CharField(max_length=50, blank=True, null=True)
     freight_price = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
     insurance = models.CharField(max_length=255, blank=True, null=True)
     shipment_type = models.CharField(max_length=50)
+    # Sum of line total_price (same as order total before VAT); remaining mirrors total_quantity for now
+    before_vat = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    total_quantity = models.IntegerField(default=0)
+    remaining = models.IntegerField(default=0)
     status = models.CharField(max_length=20, default="pending")
     approved_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -247,12 +273,23 @@ class Purchase(models.Model):
 
 
 class PurchaseItem(models.Model):
-    item_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
-    purchase = models.ForeignKey(Purchase, on_delete=models.CASCADE, related_name="items")
+    item_id = models.UUIDField(default=uuid.uuid4, editable=False)
+    # Link to Purchase by business key (purchase_number), not UUID id
+    purchase = models.ForeignKey(
+        Purchase,
+        on_delete=models.CASCADE,
+        to_field="purchase_number",
+        db_column="purchase_number",
+        related_name="items",
+    )
     item_name = models.CharField(max_length=255)
     price = models.DecimalField(max_digits=12, decimal_places=2)
     quantity = models.IntegerField()
+    remaining = models.IntegerField(default=0)
     total_price = models.DecimalField(max_digits=12, decimal_places=2)
+    # Line-level before VAT; kept equal to total_price for this workflow
+    before_vat = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    hscode = models.CharField(max_length=255, blank=True, null=True)
     measurement = models.CharField(max_length=100)
 
     def __str__(self):

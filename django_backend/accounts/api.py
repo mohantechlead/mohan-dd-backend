@@ -152,16 +152,10 @@ def update_customer(request, customer_id: uuid.UUID, payload: CustomerUpdateSche
     if err:
         return err
     customer = get_object_or_404(Partner, partnerid=customer_id)
-    if payload.name is not None:
-        customer.name = payload.name
-    if payload.email is not None:
-        customer.email = payload.email
-    if payload.phone is not None:
-        customer.phone = payload.phone
-    if payload.address is not None:
-        customer.address = payload.address
-    if payload.tin_number is not None:
-        customer.tin_number = payload.tin_number
+    data = payload.dict(exclude_unset=True)
+    for key in ("name", "email", "phone", "address", "tin_number", "contact_person", "comments"):
+        if key in data:
+            setattr(customer, key, data[key])
     customer.save()
     return {
         "id": customer.partnerid,
@@ -170,6 +164,8 @@ def update_customer(request, customer_id: uuid.UUID, payload: CustomerUpdateSche
         "phone": customer.phone,
         "address": customer.address,
         "tin_number": customer.tin_number,
+        "contact_person": customer.contact_person,
+        "comments": customer.comments,
         "partner_type": customer.partner_type,
     }
 
@@ -194,7 +190,9 @@ def create_customer(request, payload: CustomerCreateSchema):
         phone=payload.phone,
         address=payload.address,
         tin_number=payload.tin_number,
-        partner_type=payload.partner_type
+        contact_person=payload.contact_person,
+        comments=payload.comments,
+        partner_type=payload.partner_type,
     )
     return {
         "id": customer.partnerid,
@@ -203,7 +201,9 @@ def create_customer(request, payload: CustomerCreateSchema):
         "phone": customer.phone,
         "address": customer.address,
         "tin_number": customer.tin_number,
-        "partner_type": customer.partner_type
+        "contact_person": customer.contact_person,
+        "comments": customer.comments,
+        "partner_type": customer.partner_type,
     }
 
 @router.get("/supplier", response=List[SupplierListSchema])
@@ -222,16 +222,10 @@ def update_supplier(request, supplier_id: uuid.UUID, payload: SupplierUpdateSche
     if err:
         return err
     supplier = get_object_or_404(Partner, partnerid=supplier_id)
-    if payload.name is not None:
-        supplier.name = payload.name
-    if payload.email is not None:
-        supplier.email = payload.email
-    if payload.phone is not None:
-        supplier.phone = payload.phone
-    if payload.address is not None:
-        supplier.address = payload.address
-    if payload.tin_number is not None:
-        supplier.tin_number = payload.tin_number
+    data = payload.dict(exclude_unset=True)
+    for key in ("name", "email", "phone", "address", "tin_number", "contact_person", "comments"):
+        if key in data:
+            setattr(supplier, key, data[key])
     supplier.save()
     return {
         "id": supplier.partnerid,
@@ -240,6 +234,8 @@ def update_supplier(request, supplier_id: uuid.UUID, payload: SupplierUpdateSche
         "phone": supplier.phone,
         "address": supplier.address,
         "tin_number": supplier.tin_number,
+        "contact_person": supplier.contact_person,
+        "comments": supplier.comments,
         "partner_type": supplier.partner_type,
     }
 
@@ -264,7 +260,9 @@ def create_supplier(request, payload: SupplierCreateSchema):
         phone=payload.phone,
         address=payload.address,
         tin_number=payload.tin_number,
-        partner_type=payload.partner_type
+        contact_person=payload.contact_person,
+        comments=payload.comments,
+        partner_type=payload.partner_type,
     )
     return {
         "id": supplier.partnerid,
@@ -273,5 +271,7 @@ def create_supplier(request, payload: SupplierCreateSchema):
         "phone": supplier.phone,
         "address": supplier.address,
         "tin_number": supplier.tin_number,
-        "partner_type": supplier.partner_type
+        "contact_person": supplier.contact_person,
+        "comments": supplier.comments,
+        "partner_type": supplier.partner_type,
     }

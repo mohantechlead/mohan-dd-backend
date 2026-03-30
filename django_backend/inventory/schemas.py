@@ -16,16 +16,25 @@ class GrnItemCreateSchema(Schema):
 class GrnCreateSchema(Schema):
     supplier_name: str
     grn_no: str
-    plate_no: str
-    purchase_no: str
+
+    received_from: str
+    truck_no: str
+
+    # Either purchase_id or purchase_no can be provided; purchase_id is linked to Purchase -> purchase_number
+    purchase_no: str | None = None
+
+    total_quantity: int | None = None
+    store_name: str = ""
+    store_keeper: str = ""
+
     date: date
     ECD_no: str = ""
     transporter_name: str = ""
-    storekeeper_name: str = ""
     items: List[GrnItemCreateSchema]
 
 # Response schema
 class GrnItemSchema(Schema):
+    grn_no: int | None = None
     item_name: str
     quantity: int
     unit_measurement: Optional[str] = None
@@ -37,29 +46,50 @@ class GrnDetailSchema(Schema):
     id: uuid.UUID
     supplier_name: str
     grn_no: str
-    plate_no: str
-    purchase_no: str
+
+    received_from: str | None = None
+    truck_no: str | None = None
+    total_quantity: int | None = None
+    store_name: str | None = None
+    store_keeper: str | None = None
+
+    purchase_no: str | None = None
+
     date: Optional[str] = None
     ECD_no: Optional[str] = None
     transporter_name: Optional[str] = None
-    storekeeper_name: Optional[str] = None
     items: List[GrnItemSchema]
 
 
 class GrnUpdateSchema(Schema):
     supplier_name: str | None = None
-    plate_no: str | None = None
+
+    received_from: str | None = None
+    truck_no: str | None = None
+
     purchase_no: str | None = None
+
+    total_quantity: int | None = None
+    store_name: str | None = None
+    store_keeper: str | None = None
+
     ECD_no: str | None = None
     transporter_name: str | None = None
-    storekeeper_name: str | None = None
     items: List[GrnItemCreateSchema] | None = None
 
 
 class GRNListSchema(Schema):
     supplier_name: str
     grn_no: int
-    purchase_no: str
+
+    received_from: str | None = None
+    truck_no: str | None = None
+    total_quantity: int | None = None
+    store_name: str | None = None
+    store_keeper: str | None = None
+
+    purchase_no: str | None = None
+
     items: List[GrnItemSchema]
 
 # DN Schemas
@@ -146,7 +176,7 @@ class ItemSchema(Schema):
     item_id: uuid.UUID | None = None
     item_name: str
     hscode: str
-    internal_code: str
+    internal_code: str | None = None
     
 class StockSchema(Schema):
     item_name: str
@@ -177,21 +207,23 @@ class OrderCreateSchema(Schema):
     final_destination: str
     port_of_loading: str
     port_of_discharge: str
-    measurement_type: str
+    measurement_type: Optional[str] = None
     payment_terms: str
     mode_of_transport: str
-    freight: str
+    freight: Optional[str] = None
     freight_price: Optional[float]
     shipment_type: str
     items: List[OrderItemCreateSchema]
 
 
 class OrderItemSchema(Schema):
+    order_no: str | None = None
     item_name: str
     hs_code: str
     price: float
     quantity: int
     total_price: float
+    before_vat: float
     measurement: str
 
 
@@ -211,12 +243,15 @@ class OrderDetailSchema(Schema):
     final_destination: str
     port_of_loading: str
     port_of_discharge: str
-    measurement_type: str
+    measurement_type: Optional[str] = None
     payment_terms: str
     mode_of_transport: str
-    freight: str
+    freight: Optional[str] = None
     freight_price: Optional[float]
     shipment_type: str
+    PR_before_VAT: float
+    total_quantity: int
+    remaining: int
     status: str
     approved_by: Optional[str] = None
     approval_date: Optional[str] = None
@@ -240,10 +275,10 @@ class OrderUpdateSchema(Schema):
     final_destination: str
     port_of_loading: str
     port_of_discharge: str
-    measurement_type: str
+    measurement_type: Optional[str] = None
     payment_terms: str
     mode_of_transport: str
-    freight: str
+    freight: Optional[str] = None
     freight_price: Optional[float]
     shipment_type: str
     items: Optional[List[OrderItemCreateSchema]] = None
@@ -259,11 +294,17 @@ class OrderStatusUpdateSchema(Schema):
 
 
 class PurchaseItemCreateSchema(Schema):
+    item_id: uuid.UUID | None = None
     item_name: str
     price: float
     quantity: int
     total_price: float
     measurement: str
+    # If omitted, server sets remaining = quantity
+    remaining: Optional[int] = None
+    # Line before VAT; if omitted, server sets = total_price
+    before_vat: Optional[float] = None
+    hscode: Optional[str] = None
 
 
 class PurchaseCreateSchema(Schema):
@@ -280,10 +321,12 @@ class PurchaseCreateSchema(Schema):
     conditions: Optional[str]
     port_of_loading: str
     port_of_discharge: str
-    measurement_type: str
-    payment_terms: str
+    measurement_type: Optional[str] = None
+    # Updated naming to match frontend: payment_type (legacy: payment_terms)
+    payment_type: str | None = None
+    payment_terms: str | None = None
     mode_of_transport: str
-    freight: str
+    freight: Optional[str] = None
     freight_price: Optional[float]
     insurance: Optional[str]
     shipment_type: str
@@ -291,10 +334,15 @@ class PurchaseCreateSchema(Schema):
 
 
 class PurchaseItemSchema(Schema):
+    item_id: uuid.UUID | None = None
+    purchase_number: str
     item_name: str
     price: float
     quantity: int
+    remaining: int
     total_price: float
+    before_vat: float
+    hscode: Optional[str] = None
     measurement: str
 
 
@@ -324,12 +372,17 @@ class PurchaseDetailSchema(Schema):
     port_of_loading: Optional[str] = None
     port_of_discharge: Optional[str] = None
     measurement_type: Optional[str] = None
+    payment_type: Optional[str] = None
+    # Kept for backward compatibility (older frontend)
     payment_terms: Optional[str] = None
     mode_of_transport: Optional[str] = None
     freight: Optional[str] = None
     freight_price: Optional[float] = None
     insurance: Optional[str] = None
     shipment_type: Optional[str] = None
+    before_vat: float
+    total_quantity: int
+    remaining: int
     items: List[PurchaseItemSchema]
 
 
@@ -356,10 +409,11 @@ class PurchaseUpdateSchema(Schema):
     conditions: Optional[str]
     port_of_loading: str
     port_of_discharge: str
-    measurement_type: str
-    payment_terms: str
+    measurement_type: Optional[str] = None
+    payment_type: str | None = None
+    payment_terms: str | None = None
     mode_of_transport: str
-    freight: str
+    freight: Optional[str] = None
     freight_price: Optional[float]
     insurance: Optional[str]
     shipment_type: str
@@ -367,6 +421,7 @@ class PurchaseUpdateSchema(Schema):
 
 
 class ShippingInvoiceItemCreateSchema(Schema):
+    item_id: uuid.UUID | None = None
     item_name: str
     price: float
     quantity: int
@@ -375,6 +430,7 @@ class ShippingInvoiceItemCreateSchema(Schema):
     bags: Optional[float]
     net_weight: Optional[float]
     gross_weight: Optional[float]
+    hscode: Optional[str] = None
     grade: Optional[str] = None
     brand: Optional[str] = None
     country_of_origin: Optional[str] = None
@@ -388,6 +444,12 @@ class ShippingInvoiceCreateSchema(Schema):
     customer_order_number: str
     container_number: Optional[str]
     vessel: Optional[str]
+    freight_amount: Optional[float]
+    reference_no: Optional[str]
+    total_bags: Optional[float]
+    total_net_weight: Optional[float]
+    total_gross_weight: Optional[float]
+    final_price: Optional[float]
     invoice_remark: Optional[str]
     packing_list_remark: Optional[str]
     waybill_remark: Optional[str]
@@ -402,6 +464,12 @@ class ShippingInvoiceUpdateSchema(Schema):
     customer_order_number: str
     container_number: Optional[str]
     vessel: Optional[str]
+    freight_amount: Optional[float]
+    reference_no: Optional[str]
+    total_bags: Optional[float]
+    total_net_weight: Optional[float]
+    total_gross_weight: Optional[float]
+    final_price: Optional[float]
     invoice_remark: Optional[str]
     packing_list_remark: Optional[str]
     waybill_remark: Optional[str]
@@ -415,11 +483,14 @@ class ShippingInvoiceSummarySchema(Schema):
     invoice_number: str
     order_number: str
     invoice_date: date
+    reference_no: Optional[str] = None
+    final_price: Optional[float] = None
     authorized_by: Optional[str] = None
     authorized_at: Optional[str] = None
 
 
 class ShippingInvoiceItemSchema(Schema):
+    item_id: uuid.UUID | None = None
     item_name: str
     price: float
     quantity: int
@@ -428,6 +499,7 @@ class ShippingInvoiceItemSchema(Schema):
     bags: Optional[float]
     net_weight: Optional[float]
     gross_weight: Optional[float]
+    hscode: Optional[str] = None
     grade: Optional[str] = None
     brand: Optional[str] = None
     country_of_origin: Optional[str] = None
@@ -442,6 +514,12 @@ class ShippingInvoiceDetailSchema(Schema):
     customer_order_number: str
     container_number: Optional[str]
     vessel: Optional[str]
+    freight_amount: Optional[float]
+    reference_no: Optional[str]
+    total_bags: Optional[float]
+    total_net_weight: Optional[float]
+    total_gross_weight: Optional[float]
+    final_price: Optional[float]
     invoice_remark: Optional[str]
     packing_list_remark: Optional[str]
     waybill_remark: Optional[str]

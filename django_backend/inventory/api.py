@@ -1,5 +1,7 @@
 import html
 import logging
+import re
+from decimal import Decimal
 from ninja import Router
 from typing import List, Optional
 from datetime import datetime
@@ -70,6 +72,57 @@ from django.db.models import Sum
 from django.utils import timezone
 
 router = Router()
+
+# M1085, M1086, ... (case-insensitive M + digits)
+_M_ORDER_NUMBER_RE = re.compile(r"^M\s*(\d+)$", re.IGNORECASE)
+
+# Purchases: MPDDFZE001, MPDDFZE002, ... (case-insensitive prefix)
+_PURCHASE_NUMBER_RE = re.compile(r"^MPDDFZE(\d+)$", re.IGNORECASE)
+
+
+def _purchase_aggregate_from_line_items(items) -> tuple[Decimal, int, int]:
+    """before_vat = sum(total_price); total_quantity and remaining = sum(quantity) (same for now)."""
+    before_vat = sum(Decimal(str(i.total_price)) for i in items)
+    qty_sum = sum(int(i.quantity) for i in items)
+    return before_vat, qty_sum, qty_sum
+
+
+def _order_aggregate_from_line_items(items) -> tuple[Decimal, int, int]:
+    """PR_before_VAT = sum(total_price); remaining mirrors total_quantity for now."""
+    pr_before_vat = sum(Decimal(str(i.total_price)) for i in items)
+    qty_sum = sum(int(i.quantity) for i in items)
+    return pr_before_vat, qty_sum, qty_sum
+
+
+def _next_m_series_number(values) -> str:
+    """Next M#### after max existing M-prefixed value; default M1001 if none."""
+    max_n = None
+    for val in values:
+        if val is None:
+            continue
+        m = _M_ORDER_NUMBER_RE.match(str(val).strip())
+        if m:
+            n = int(m.group(1))
+            max_n = n if max_n is None else max(max_n, n)
+    if max_n is None:
+        return "M1001"
+    return "M{0}".format(max_n + 1)
+
+
+def _next_mpddfze_purchase_number(values) -> str:
+    """Next MPDDFZE### after max existing purchase number; default MPDDFZE001 if none."""
+    max_n = None
+    for val in values:
+        if val is None:
+            continue
+        m = _PURCHASE_NUMBER_RE.match(str(val).strip())
+        if m:
+            n = int(m.group(1))
+            max_n = n if max_n is None else max(max_n, n)
+    if max_n is None:
+        return "MPDDFZE001"
+    next_n = max_n + 1
+    return "MPDDFZE{0:03d}".format(next_n)
 
 
 def _require_admin(request):
@@ -359,6 +412,110 @@ def _check_and_notify_negative_stock():
         logger.exception("Failed to send negative stock alert email: %s", e)
 
 
+def _validate_grn_items(items):
+    """
+    Ensure every GRN item row is a real item from the item list.
+    We validate by `(internal_code, item_name)` and require `quantity > 0`.
+    """
+    if not items:
+        raise ValueError("At least one GRN item is required.")
+
+    validated = []
+    for item in items:
+        item_name = str(getattr(item, "item_name", "") or "").strip()
+        internal_code = str(getattr(item, "internal_code", "") or "").strip()
+        if not item_name or not internal_code:
+            raise ValueError("Each GRN item must be selected from the item list.")
+
+        try:
+            quantity = int(getattr(item, "quantity", 0) or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Invalid GRN item quantity.")
+
+        if quantity <= 0:
+            raise ValueError("Each GRN item quantity must be greater than 0.")
+
+        # Verify (internal_code + item_name) matches an existing item.
+        if not Items.objects.filter(
+            internal_code=internal_code,
+            item_name__iexact=item_name,
+        ).exists():
+            raise ValueError(f"Item '{item_name}' is not in the item list.")
+
+        unit_measurement = getattr(item, "unit_measurement", "") or ""
+
+        bags_val = None
+        raw_bags = getattr(item, "bags", None)
+        if raw_bags is not None and str(raw_bags).strip():
+            try:
+                bags_val = float(raw_bags)
+            except (ValueError, TypeError):
+                bags_val = None
+
+        validated.append(
+            {
+                "item_name": item_name,
+                "quantity": quantity,
+                "unit_measurement": unit_measurement,
+                "internal_code": internal_code,
+                "bags": bags_val,
+            }
+        )
+
+    return validated
+
+
+def _validate_dn_items(items):
+    """
+    Ensure every DN item row is a real item from the item list.
+    We validate by `(internal_code, item_name)` and require `quantity > 0`.
+    """
+    if not items:
+        raise ValueError("At least one DN item is required.")
+
+    validated = []
+    for item in items:
+        item_name = str(getattr(item, "item_name", "") or "").strip()
+        internal_code = str(getattr(item, "internal_code", "") or "").strip()
+        if not item_name or not internal_code:
+            raise ValueError("Each DN item must be selected from the item list.")
+
+        try:
+            quantity = int(getattr(item, "quantity", 0) or 0)
+        except (TypeError, ValueError):
+            raise ValueError("Invalid DN item quantity.")
+
+        if quantity <= 0:
+            raise ValueError("Each DN item quantity must be greater than 0.")
+
+        if not Items.objects.filter(
+            internal_code=internal_code,
+            item_name__iexact=item_name,
+        ).exists():
+            raise ValueError(f"Item '{item_name}' is not in the item list.")
+
+        unit_measurement = getattr(item, "unit_measurement", "") or ""
+
+        bags_val = getattr(item, "bags", None)
+        if bags_val is not None:
+            try:
+                bags_val = float(bags_val)
+            except (ValueError, TypeError):
+                bags_val = None
+
+        validated.append(
+            {
+                "item_name": item_name,
+                "quantity": quantity,
+                "unit_measurement": unit_measurement,
+                "internal_code": internal_code,
+                "bags": bags_val,
+            }
+        )
+
+    return validated
+
+
 @router.post("/grn", response=GrnDetailSchema)
 def create_grn(request, payload: GrnCreateSchema):
     try:
@@ -379,35 +536,47 @@ def create_grn(request, payload: GrnCreateSchema):
                 status=400,
             )
 
+        # purchase is stored on GRN as plain text (`purchase_no`) - no FK link.
+        if not payload.purchase_no:
+            return JsonResponse(
+                {"detail": "purchase_no is required."},
+                status=400,
+            )
+
+        # Optional existence check (do not block if you don't want strict validation)
+        Purchase.objects.filter(
+            purchase_number__iexact=str(payload.purchase_no).strip()
+        ).exists()
+
+        validated_items = _validate_grn_items(payload.items)
+        computed_total_quantity = sum(item["quantity"] for item in validated_items)
+
         grn = GRN.objects.create(
             id=uuid.uuid4(),
             supplier_name=payload.supplier_name,
             grn_no=grn_no_val,
-            plate_no=payload.plate_no,
-            purchase_no=payload.purchase_no,
+            received_from=payload.received_from,
+            truck_no=payload.truck_no,
+            purchase_no=str(payload.purchase_no).strip(),
+            total_quantity=computed_total_quantity if computed_total_quantity is not None else 0,
+            store_name=payload.store_name or "",
+            store_keeper=payload.store_keeper or "",
             date=payload.date,
             ECD_no=payload.ECD_no,
             transporter_name=payload.transporter_name,
-            storekeeper_name=payload.storekeeper_name,
         )
 
         created_items = []
-        for item in payload.items:
-            bags_val = None
-            if item.bags is not None and str(item.bags).strip():
-                try:
-                    bags_val = float(item.bags)
-                except (ValueError, TypeError):
-                    pass
-
+        for item in validated_items:
             new_item = GrnItems.objects.create(
                 item_id=uuid.uuid4(),
                 grn=grn,
-                item_name=item.item_name,
-                quantity=int(item.quantity) if item.quantity is not None else 0,
-                unit_measurement=item.unit_measurement or "",
-                internal_code=item.internal_code or None,
-                bags=bags_val,
+                grn_no=grn.grn_no,
+                item_name=item["item_name"],
+                quantity=item["quantity"],
+                unit_measurement=item["unit_measurement"],
+                internal_code=item["internal_code"],
+                bags=item["bags"],
             )
             created_items.append(new_item)
 
@@ -415,6 +584,8 @@ def create_grn(request, payload: GrnCreateSchema):
 
         grn.refresh_from_db()
         return _grn_to_detail(grn)
+    except ValueError as e:
+        return JsonResponse({"detail": str(e)}, status=400)
     except Exception as e:
         logger.exception("GRN create failed: %s", e)
         return JsonResponse(
@@ -434,8 +605,14 @@ def list_GRN(request):
                     supplier_name=grn.supplier_name,
                     grn_no=grn.grn_no,
                     purchase_no=grn.purchase_no,
+                    received_from=grn.received_from,
+                    truck_no=grn.truck_no,
+                    total_quantity=grn.total_quantity,
+                    store_name=grn.store_name,
+                    store_keeper=grn.store_keeper,
                     items=[
                         GrnItemSchema(
+                            grn_no=item.grn_no,
                             item_name=item.item_name,
                             quantity=item.quantity
                         )
@@ -466,32 +643,53 @@ def update_GRN(request, grn_no: str, payload: GrnUpdateSchema):
     grn = get_object_or_404(GRN, grn_no=int(grn_no) if grn_no.isdigit() else grn_no)
     if payload.supplier_name is not None:
         grn.supplier_name = payload.supplier_name
-    if payload.plate_no is not None:
-        grn.plate_no = payload.plate_no
+
+    if payload.received_from is not None:
+        grn.received_from = payload.received_from
+    if payload.truck_no is not None:
+        grn.truck_no = payload.truck_no
+
+    if payload.store_name is not None:
+        grn.store_name = payload.store_name
+
+    if payload.store_keeper is not None:
+        grn.store_keeper = payload.store_keeper
+
     if payload.purchase_no is not None:
-        grn.purchase_no = payload.purchase_no
+        grn.purchase_no = str(payload.purchase_no).strip()
+
+    if payload.total_quantity is not None:
+        grn.total_quantity = payload.total_quantity
+
     if payload.ECD_no is not None:
         grn.ECD_no = payload.ECD_no
     if payload.transporter_name is not None:
         grn.transporter_name = payload.transporter_name
-    if payload.storekeeper_name is not None:
-        grn.storekeeper_name = payload.storekeeper_name
     if payload.items is not None:
+        try:
+            validated_items = _validate_grn_items(payload.items)
+        except ValueError as e:
+            return JsonResponse({"detail": str(e)}, status=400)
+
         grn.items.all().delete()
-        for item in payload.items:
+        computed_total_quantity = sum(item["quantity"] for item in validated_items)
+
+        for item in validated_items:
             GrnItems.objects.create(
                 item_id=uuid.uuid4(),
                 grn=grn,
-                item_name=item.item_name,
-                quantity=item.quantity,
-                unit_measurement=item.unit_measurement,
-                internal_code=item.internal_code,
-                bags=getattr(item, "bags", None),
+                grn_no=grn.grn_no,
+                item_name=item["item_name"],
+                quantity=item["quantity"],
+                unit_measurement=item["unit_measurement"],
+                internal_code=item["internal_code"],
+                bags=item["bags"],
             )
+
+        # Items are the source of truth for total quantity
+        grn.total_quantity = computed_total_quantity
     grn.save()
     grn.refresh_from_db()
-    if payload.items is not None:
-        _check_and_notify_negative_stock()
     if payload.items is not None:
         _check_and_notify_negative_stock()
     return _grn_to_detail(grn)
@@ -514,14 +712,18 @@ def _grn_to_detail(grn):
         "id": grn.id,
         "supplier_name": grn.supplier_name,
         "grn_no": str(grn.grn_no),
-        "plate_no": grn.plate_no or "",
+        "received_from": grn.received_from,
+        "truck_no": grn.truck_no,
+        "total_quantity": grn.total_quantity,
+        "store_name": grn.store_name,
+        "store_keeper": grn.store_keeper,
         "purchase_no": grn.purchase_no,
         "date": grn.date.isoformat() if grn.date else None,
         "ECD_no": grn.ECD_no,
         "transporter_name": grn.transporter_name,
-        "storekeeper_name": grn.storekeeper_name,
         "items": [
             {
+                "grn_no": item.grn_no,
                 "item_name": item.item_name,
                 "quantity": item.quantity,
                 "unit_measurement": item.unit_measurement,
@@ -614,6 +816,11 @@ def create_dn(request, payload: DnCreateSchema):
                 status=400,
             )
 
+    try:
+        validated_items = _validate_dn_items(payload.items)
+    except ValueError as e:
+        return JsonResponse({"detail": str(e)}, status=400)
+
     # Create DN
     dn = DN.objects.create(
         id=uuid.uuid4(),
@@ -632,15 +839,15 @@ def create_dn(request, payload: DnCreateSchema):
 
     # Create Items
     created_items = []
-    for item in payload.items:
+    for item in validated_items:
         new_item = DNItems.objects.create(
             item_id=uuid.uuid4(),
             dn=dn,
-            item_name=item.item_name,
-            quantity=item.quantity,
-            unit_measurement=item.unit_measurement,
-            internal_code = item.internal_code,
-            bags = item.bags
+            item_name=item["item_name"],
+            quantity=item["quantity"],
+            unit_measurement=item["unit_measurement"],
+            internal_code=item["internal_code"],
+            bags=item["bags"],
         )
         created_items.append(new_item)
 
@@ -769,16 +976,21 @@ def update_DN(request, dn_no: str, payload: DnUpdateSchema):
     if payload.authorized_by is not None:
         dn.authorized_by = payload.authorized_by
     if payload.items is not None:
+        try:
+            validated_items = _validate_dn_items(payload.items)
+        except ValueError as e:
+            return JsonResponse({"detail": str(e)}, status=400)
+
         dn.dn_items.all().delete()
-        for item in payload.items:
+        for item in validated_items:
             DNItems.objects.create(
                 item_id=uuid.uuid4(),
                 dn=dn,
-                item_name=item.item_name,
-                quantity=item.quantity,
-                unit_measurement=item.unit_measurement,
-                internal_code=getattr(item, "internal_code", None),
-                bags=getattr(item, "bags", None),
+                item_name=item["item_name"],
+                quantity=item["quantity"],
+                unit_measurement=item["unit_measurement"],
+                internal_code=item["internal_code"],
+                bags=item["bags"],
             )
     dn.save()
     dn.refresh_from_db()
@@ -980,6 +1192,10 @@ def create_order(request, payload: OrderCreateSchema):
             status=400,
         )
 
+    pr_before_vat, total_quantity, remaining = _order_aggregate_from_line_items(
+        payload.items
+    )
+
     order = Order.objects.create(
         id=uuid.uuid4(),
         order_number=payload.order_number,
@@ -1000,6 +1216,9 @@ def create_order(request, payload: OrderCreateSchema):
         freight=payload.freight,
         freight_price=payload.freight_price,
         shipment_type=payload.shipment_type,
+        PR_before_VAT=pr_before_vat,
+        total_quantity=total_quantity,
+        remaining=remaining,
     )
 
     created_items: list[OrderItem] = []
@@ -1007,11 +1226,13 @@ def create_order(request, payload: OrderCreateSchema):
         new_item = OrderItem.objects.create(
             item_id=uuid.uuid4(),
             order=order,
+            order_no=order.order_number,
             item_name=item.item_name,
             hs_code=item.hs_code,
             price=item.price,
             quantity=item.quantity,
             total_price=item.total_price,
+            before_vat=item.total_price,
             measurement=item.measurement,
         )
         created_items.append(new_item)
@@ -1038,6 +1259,9 @@ def create_order(request, payload: OrderCreateSchema):
         "freight": order.freight,
         "freight_price": float(order.freight_price) if order.freight_price is not None else None,
         "shipment_type": order.shipment_type,
+        "PR_before_VAT": float(order.PR_before_VAT),
+        "total_quantity": order.total_quantity,
+        "remaining": order.remaining,
         "status": order.status,
         "approved_by": order.approved_by.username if order.approved_by else None,
         "approval_date": order.approval_date.isoformat() if order.approval_date else None,
@@ -1048,11 +1272,13 @@ def create_order(request, payload: OrderCreateSchema):
         "status_remark": order.status_remark,
         "items": [
             OrderItemSchema(
+                order_no=i.order_no,
                 item_name=i.item_name,
                 hs_code=i.hs_code,
                 price=float(i.price),
                 quantity=i.quantity,
                 total_price=float(i.total_price),
+                before_vat=float(i.before_vat),
                 measurement=i.measurement,
             )
             for i in created_items
@@ -1088,6 +1314,9 @@ def list_orders(request):
                 freight=o.freight,
                 freight_price=float(o.freight_price) if o.freight_price is not None else None,
                 shipment_type=o.shipment_type,
+                PR_before_VAT=float(o.PR_before_VAT),
+                total_quantity=o.total_quantity,
+                remaining=o.remaining,
                 status=o.status,
                 approved_by=o.approved_by.username if o.approved_by else None,
                 approval_date=o.approval_date.isoformat() if o.approval_date else None,
@@ -1098,11 +1327,13 @@ def list_orders(request):
                 status_remark=o.status_remark,
                 items=[
                     OrderItemSchema(
+                        order_no=i.order_no,
                         item_name=i.item_name,
                         hs_code=i.hs_code,
                         price=float(i.price),
                         quantity=i.quantity,
                         total_price=float(i.total_price),
+                        before_vat=float(i.before_vat),
                         measurement=i.measurement,
                     )
                     for i in o.items.all()
@@ -1110,6 +1341,13 @@ def list_orders(request):
             )
         )
     return result
+
+
+@router.get("/orders/next-number")
+def next_order_number(request):
+    """Suggest next order number from max existing M#### (sales)."""
+    values = Order.objects.values_list("order_number", flat=True)
+    return {"next_number": _next_m_series_number(values)}
 
 
 @router.get("/orders/{order_number}", response=OrderDetailSchema)
@@ -1140,6 +1378,9 @@ def get_order_detail(request, order_number: str):
         freight=order.freight,
         freight_price=float(order.freight_price) if order.freight_price is not None else None,
         shipment_type=order.shipment_type,
+        PR_before_VAT=float(order.PR_before_VAT),
+        total_quantity=order.total_quantity,
+        remaining=order.remaining,
         status=order.status,
         approved_by=order.approved_by.username if order.approved_by else None,
         approval_date=order.approval_date.isoformat() if order.approval_date else None,
@@ -1150,11 +1391,13 @@ def get_order_detail(request, order_number: str):
         status_remark=order.status_remark,
         items=[
             OrderItemSchema(
+                order_no=i.order_no,
                 item_name=i.item_name,
                 hs_code=i.hs_code,
                 price=float(i.price),
                 quantity=i.quantity,
                 total_price=float(i.total_price),
+                before_vat=float(i.before_vat),
                 measurement=i.measurement,
             )
             for i in order.items.all()
@@ -1189,6 +1432,13 @@ def update_order(request, order_number: str, payload: OrderUpdateSchema):
     order.freight = payload.freight
     order.freight_price = payload.freight_price
     order.shipment_type = payload.shipment_type
+    order_line_items = payload.items if payload.items is not None else order.items.all()
+    pr_before_vat, total_quantity, remaining = _order_aggregate_from_line_items(
+        order_line_items
+    )
+    order.PR_before_VAT = pr_before_vat
+    order.total_quantity = total_quantity
+    order.remaining = remaining
     order.save()
 
     if payload.items is not None:
@@ -1196,11 +1446,13 @@ def update_order(request, order_number: str, payload: OrderUpdateSchema):
         for item in payload.items:
             OrderItem.objects.create(
                 order=order,
+                order_no=order.order_number,
                 item_name=item.item_name,
                 hs_code=item.hs_code,
                 price=item.price,
                 quantity=item.quantity,
                 total_price=item.total_price,
+                before_vat=item.total_price,
                 measurement=item.measurement,
             )
 
@@ -1209,11 +1461,13 @@ def update_order(request, order_number: str, payload: OrderUpdateSchema):
         for item in payload.items:
             OrderItem.objects.create(
                 order=order,
+                order_no=order.order_number,
                 item_name=item.item_name,
                 hs_code=item.hs_code,
                 price=item.price,
                 quantity=item.quantity,
                 total_price=item.total_price,
+                before_vat=item.total_price,
                 measurement=item.measurement,
             )
 
@@ -1239,6 +1493,9 @@ def update_order(request, order_number: str, payload: OrderUpdateSchema):
         freight=order.freight,
         freight_price=float(order.freight_price) if order.freight_price is not None else None,
         shipment_type=order.shipment_type,
+        PR_before_VAT=float(order.PR_before_VAT),
+        total_quantity=order.total_quantity,
+        remaining=order.remaining,
         status=order.status,
         approved_by=order.approved_by.username if order.approved_by else None,
         approval_date=order.approval_date.isoformat() if order.approval_date else None,
@@ -1249,11 +1506,13 @@ def update_order(request, order_number: str, payload: OrderUpdateSchema):
         status_remark=order.status_remark,
         items=[
             OrderItemSchema(
+                order_no=i.order_no,
                 item_name=i.item_name,
                 hs_code=i.hs_code,
                 price=float(i.price),
                 quantity=i.quantity,
                 total_price=float(i.total_price),
+                before_vat=float(i.before_vat),
                 measurement=i.measurement,
             )
             for i in order.items.all()
@@ -1304,6 +1563,9 @@ def approve_order(request, order_number: str, payload: OrderApproveSchema):
         freight=order.freight,
         freight_price=float(order.freight_price) if order.freight_price is not None else None,
         shipment_type=order.shipment_type,
+        PR_before_VAT=float(order.PR_before_VAT),
+        total_quantity=order.total_quantity,
+        remaining=order.remaining,
         status=order.status,
         approved_by=order.approved_by.username if order.approved_by else None,
         approval_date=order.approval_date.isoformat() if order.approval_date else None,
@@ -1314,11 +1576,13 @@ def approve_order(request, order_number: str, payload: OrderApproveSchema):
         status_remark=order.status_remark,
         items=[
             OrderItemSchema(
+                order_no=i.order_no,
                 item_name=i.item_name,
                 hs_code=i.hs_code,
                 price=float(i.price),
                 quantity=i.quantity,
                 total_price=float(i.total_price),
+                before_vat=float(i.before_vat),
                 measurement=i.measurement,
             )
             for i in order.items.all()
@@ -1377,6 +1641,9 @@ def update_order_status(request, order_number: str, payload: OrderStatusUpdateSc
         freight=order.freight,
         freight_price=float(order.freight_price) if order.freight_price is not None else None,
         shipment_type=order.shipment_type,
+        PR_before_VAT=float(order.PR_before_VAT),
+        total_quantity=order.total_quantity,
+        remaining=order.remaining,
         status=order.status,
         approved_by=order.approved_by.username if order.approved_by else None,
         approval_date=order.approval_date.isoformat() if order.approval_date else None,
@@ -1387,11 +1654,13 @@ def update_order_status(request, order_number: str, payload: OrderStatusUpdateSc
         status_remark=order.status_remark,
         items=[
             OrderItemSchema(
+                order_no=i.order_no,
                 item_name=i.item_name,
                 hs_code=i.hs_code,
                 price=float(i.price),
                 quantity=i.quantity,
                 total_price=float(i.total_price),
+                before_vat=float(i.before_vat),
                 measurement=i.measurement,
             )
             for i in order.items.all()
@@ -1407,6 +1676,14 @@ def create_purchase(request, payload: PurchaseCreateSchema):
             {"detail": "Purchase number already exists."},
             status=400,
         )
+
+    payment_value = payload.payment_type or payload.payment_terms
+    if not payment_value:
+        return JsonResponse({"detail": "payment_type is required."}, status=400)
+
+    before_vat, total_quantity, remaining = _purchase_aggregate_from_line_items(
+        payload.items
+    )
 
     purchase = Purchase.objects.create(
         id=uuid.uuid4(),
@@ -1424,29 +1701,50 @@ def create_purchase(request, payload: PurchaseCreateSchema):
         port_of_loading=payload.port_of_loading,
         port_of_discharge=payload.port_of_discharge,
         measurement_type=payload.measurement_type,
-        payment_terms=payload.payment_terms,
+        payment_terms=payment_value,  # DB column name (legacy)
         mode_of_transport=payload.mode_of_transport,
         freight=payload.freight,
         freight_price=payload.freight_price,
         insurance=payload.insurance,
         shipment_type=payload.shipment_type,
+        before_vat=before_vat,
+        total_quantity=total_quantity,
+        remaining=remaining,
         status="pending",
     )
 
     created_items: list[PurchaseItem] = []
     for item in payload.items:
+        line_remaining = (
+            item.remaining if item.remaining is not None else item.quantity
+        )
+        line_before_vat = (
+            item.before_vat if item.before_vat is not None else item.total_price
+        )
+        hs = (item.hscode or "").strip() or None
+        line_item_id = item.item_id if item.item_id is not None else uuid.uuid4()
         new_item = PurchaseItem.objects.create(
-            item_id=uuid.uuid4(),
+            item_id=line_item_id,
             purchase=purchase,
             item_name=item.item_name,
             price=item.price,
             quantity=item.quantity,
+            remaining=line_remaining,
             total_price=item.total_price,
+            before_vat=Decimal(str(line_before_vat)),
+            hscode=hs,
             measurement=item.measurement,
         )
         created_items.append(new_item)
 
     return _purchase_to_detail_schema(purchase)
+
+
+@router.get("/purchases/next-number")
+def next_purchase_number(request):
+    """Suggest next purchase number from max existing MPDDFZE### (e.g. MPDDFZE003)."""
+    values = Purchase.objects.values_list("purchase_number", flat=True)
+    return {"next_number": _next_mpddfze_purchase_number(values)}
 
 
 @router.get("/purchases/{purchase_number}", response=PurchaseDetailSchema)
@@ -1485,6 +1783,7 @@ def approve_purchase(request, purchase_number: str, payload: PurchaseApproveSche
 
 
 def _purchase_to_detail_schema(purchase):
+    payment_value = purchase.payment_terms
     return PurchaseDetailSchema(
         id=purchase.id,
         purchase_number=purchase.purchase_number,
@@ -1511,18 +1810,27 @@ def _purchase_to_detail_schema(purchase):
         port_of_loading=purchase.port_of_loading,
         port_of_discharge=purchase.port_of_discharge,
         measurement_type=purchase.measurement_type,
-        payment_terms=purchase.payment_terms,
+        payment_type=payment_value,
+        payment_terms=payment_value,  # legacy response key
         mode_of_transport=purchase.mode_of_transport,
         freight=purchase.freight,
         freight_price=float(purchase.freight_price) if purchase.freight_price is not None else None,
         insurance=purchase.insurance,
         shipment_type=purchase.shipment_type,
+        before_vat=float(purchase.before_vat),
+        total_quantity=purchase.total_quantity,
+        remaining=purchase.remaining,
         items=[
             PurchaseItemSchema(
+                item_id=i.item_id,
+                purchase_number=str(i.purchase_id),
                 item_name=i.item_name,
                 price=float(i.price),
                 quantity=i.quantity,
+                remaining=i.remaining,
                 total_price=float(i.total_price),
+                before_vat=float(i.before_vat),
+                hscode=i.hscode,
                 measurement=i.measurement,
             )
             for i in purchase.items.all()
@@ -1552,23 +1860,43 @@ def update_purchase(request, purchase_number: str, payload: PurchaseUpdateSchema
     purchase.port_of_loading = payload.port_of_loading
     purchase.port_of_discharge = payload.port_of_discharge
     purchase.measurement_type = payload.measurement_type
-    purchase.payment_terms = payload.payment_terms
+    payment_value = payload.payment_type or payload.payment_terms
+    if not payment_value:
+        return JsonResponse({"detail": "payment_type is required."}, status=400)
+    purchase.payment_terms = payment_value  # DB column name (legacy)
     purchase.mode_of_transport = payload.mode_of_transport
     purchase.freight = payload.freight
     purchase.freight_price = payload.freight_price
     purchase.insurance = payload.insurance
     purchase.shipment_type = payload.shipment_type
+    before_vat, total_quantity, remaining = _purchase_aggregate_from_line_items(
+        payload.items
+    )
+    purchase.before_vat = before_vat
+    purchase.total_quantity = total_quantity
+    purchase.remaining = remaining
     purchase.save()
 
     purchase.items.all().delete()
     for item in payload.items:
+        line_remaining = (
+            item.remaining if item.remaining is not None else item.quantity
+        )
+        line_before_vat = (
+            item.before_vat if item.before_vat is not None else item.total_price
+        )
+        hs = (item.hscode or "").strip() or None
+        line_item_id = item.item_id if item.item_id is not None else uuid.uuid4()
         PurchaseItem.objects.create(
-            item_id=uuid.uuid4(),
+            item_id=line_item_id,
             purchase=purchase,
             item_name=item.item_name,
             price=item.price,
             quantity=item.quantity,
+            remaining=line_remaining,
             total_price=item.total_price,
+            before_vat=Decimal(str(line_before_vat)),
+            hscode=hs,
             measurement=item.measurement,
         )
 
@@ -1641,6 +1969,12 @@ def create_shipping_invoice(request, payload: ShippingInvoiceCreateSchema):
         customer_order_number=payload.customer_order_number,
         container_number=payload.container_number,
         vessel=payload.vessel,
+        freight_amount=payload.freight_amount,
+        reference_no=payload.reference_no,
+        total_bags=payload.total_bags,
+        total_net_weight=payload.total_net_weight,
+        total_gross_weight=payload.total_gross_weight,
+        final_price=payload.final_price,
         invoice_remark=payload.invoice_remark,
         packing_list_remark=payload.packing_list_remark,
         waybill_remark=payload.waybill_remark,
@@ -1652,6 +1986,7 @@ def create_shipping_invoice(request, payload: ShippingInvoiceCreateSchema):
         ShippingInvoiceItem.objects.create(
             id=uuid.uuid4(),
             invoice=invoice,
+            item_id=getattr(item, "item_id", None),
             item_name=item.item_name,
             price=item.price,
             quantity=item.quantity,
@@ -1660,6 +1995,7 @@ def create_shipping_invoice(request, payload: ShippingInvoiceCreateSchema):
             bags=item.bags,
             net_weight=item.net_weight,
             gross_weight=item.gross_weight,
+            hscode=getattr(item, "hscode", None),
             grade=item.grade,
             brand=item.brand,
             country_of_origin=getattr(item, "country_of_origin", None),
@@ -1670,6 +2006,8 @@ def create_shipping_invoice(request, payload: ShippingInvoiceCreateSchema):
         invoice_number=invoice.invoice_number,
         order_number=invoice.order.order_number,
         invoice_date=invoice.invoice_date,
+        reference_no=invoice.reference_no,
+        final_price=float(invoice.final_price) if invoice.final_price is not None else None,
     )
 
 
@@ -1689,6 +2027,8 @@ def list_shipping_invoices(request, order_number: Optional[str] = None):
                 invoice_number=inv.invoice_number,
                 order_number=inv.order.order_number,
                 invoice_date=inv.invoice_date,
+                reference_no=inv.reference_no,
+                final_price=float(inv.final_price) if inv.final_price is not None else None,
                 authorized_by=inv.authorized_by,
                 authorized_at=inv.authorized_at.isoformat() if inv.authorized_at else None,
             )
@@ -1710,6 +2050,12 @@ def get_shipping_invoice_detail(request, invoice_id: uuid.UUID):
         customer_order_number=invoice.customer_order_number,
         container_number=invoice.container_number,
         vessel=invoice.vessel,
+        freight_amount=float(invoice.freight_amount) if invoice.freight_amount is not None else None,
+        reference_no=invoice.reference_no,
+        total_bags=invoice.total_bags,
+        total_net_weight=invoice.total_net_weight,
+        total_gross_weight=invoice.total_gross_weight,
+        final_price=float(invoice.final_price) if invoice.final_price is not None else None,
         invoice_remark=invoice.invoice_remark,
         packing_list_remark=invoice.packing_list_remark,
         waybill_remark=invoice.waybill_remark,
@@ -1719,6 +2065,7 @@ def get_shipping_invoice_detail(request, invoice_id: uuid.UUID):
         authorized_at=invoice.authorized_at.isoformat() if invoice.authorized_at else None,
         items=[
             ShippingInvoiceItemSchema(
+                item_id=i.item_id,
                 item_name=i.item_name,
                 price=float(i.price),
                 quantity=i.quantity,
@@ -1727,6 +2074,7 @@ def get_shipping_invoice_detail(request, invoice_id: uuid.UUID):
                 bags=i.bags,
                 net_weight=i.net_weight,
                 gross_weight=i.gross_weight,
+                hscode=i.hscode,
                 grade=i.grade,
                 brand=i.brand,
                 country_of_origin=i.country_of_origin,
@@ -1749,6 +2097,12 @@ def update_shipping_invoice(
     invoice.customer_order_number = payload.customer_order_number
     invoice.container_number = payload.container_number
     invoice.vessel = payload.vessel
+    invoice.freight_amount = payload.freight_amount
+    invoice.reference_no = payload.reference_no
+    invoice.total_bags = payload.total_bags
+    invoice.total_net_weight = payload.total_net_weight
+    invoice.total_gross_weight = payload.total_gross_weight
+    invoice.final_price = payload.final_price
     invoice.invoice_remark = payload.invoice_remark
     invoice.packing_list_remark = payload.packing_list_remark
     invoice.waybill_remark = payload.waybill_remark
@@ -1762,6 +2116,7 @@ def update_shipping_invoice(
         ShippingInvoiceItem.objects.create(
             id=uuid.uuid4(),
             invoice=invoice,
+            item_id=getattr(item, "item_id", None),
             item_name=item.item_name,
             price=item.price,
             quantity=item.quantity,
@@ -1770,6 +2125,7 @@ def update_shipping_invoice(
             bags=item.bags,
             net_weight=item.net_weight,
             gross_weight=item.gross_weight,
+            hscode=getattr(item, "hscode", None),
             grade=item.grade,
             brand=item.brand,
             country_of_origin=getattr(item, "country_of_origin", None),
@@ -1786,6 +2142,12 @@ def update_shipping_invoice(
         customer_order_number=invoice.customer_order_number,
         container_number=invoice.container_number,
         vessel=invoice.vessel,
+        freight_amount=float(invoice.freight_amount) if invoice.freight_amount is not None else None,
+        reference_no=invoice.reference_no,
+        total_bags=invoice.total_bags,
+        total_net_weight=invoice.total_net_weight,
+        total_gross_weight=invoice.total_gross_weight,
+        final_price=float(invoice.final_price) if invoice.final_price is not None else None,
         invoice_remark=invoice.invoice_remark,
         packing_list_remark=invoice.packing_list_remark,
         waybill_remark=invoice.waybill_remark,
@@ -1795,6 +2157,7 @@ def update_shipping_invoice(
         authorized_at=invoice.authorized_at.isoformat() if invoice.authorized_at else None,
         items=[
             ShippingInvoiceItemSchema(
+                item_id=i.item_id,
                 item_name=i.item_name,
                 price=float(i.price),
                 quantity=i.quantity,
@@ -1803,6 +2166,7 @@ def update_shipping_invoice(
                 bags=i.bags,
                 net_weight=i.net_weight,
                 gross_weight=i.gross_weight,
+                hscode=i.hscode,
                 grade=i.grade,
                 brand=i.brand,
                 country_of_origin=i.country_of_origin,
@@ -1963,6 +2327,12 @@ def authorize_shipping_invoice(request, invoice_id: uuid.UUID):
         customer_order_number=invoice.customer_order_number,
         container_number=invoice.container_number,
         vessel=invoice.vessel,
+        freight_amount=float(invoice.freight_amount) if invoice.freight_amount is not None else None,
+        reference_no=invoice.reference_no,
+        total_bags=invoice.total_bags,
+        total_net_weight=invoice.total_net_weight,
+        total_gross_weight=invoice.total_gross_weight,
+        final_price=float(invoice.final_price) if invoice.final_price is not None else None,
         invoice_remark=invoice.invoice_remark,
         packing_list_remark=invoice.packing_list_remark,
         waybill_remark=invoice.waybill_remark,
@@ -1972,6 +2342,7 @@ def authorize_shipping_invoice(request, invoice_id: uuid.UUID):
         authorized_at=invoice.authorized_at.isoformat() if invoice.authorized_at else None,
         items=[
             ShippingInvoiceItemSchema(
+                item_id=i.item_id,
                 item_name=i.item_name,
                 price=float(i.price),
                 quantity=i.quantity,
@@ -1980,6 +2351,7 @@ def authorize_shipping_invoice(request, invoice_id: uuid.UUID):
                 bags=i.bags,
                 net_weight=i.net_weight,
                 gross_weight=i.gross_weight,
+                hscode=i.hscode,
                 grade=i.grade,
                 brand=i.brand,
                 country_of_origin=i.country_of_origin,
