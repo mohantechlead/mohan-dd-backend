@@ -139,11 +139,35 @@ def delete_user(request, user_id: int):
 @router.get("/customer", response=List[CustomerListSchema])
 def list_customers(request):
     qs = Partner.objects.filter(partner_type="customer")
-    return qs
+    return [
+        {
+            "id": c.partnerid,
+            "name": c.name,
+            "email": c.email,
+            "phone": c.phone,
+            "address": c.address,
+            "partner_type": c.partner_type,
+            "tin_number": c.tin_number,
+            "contact_person": c.contact_person,
+            "comments": c.comments,
+        }
+        for c in qs
+    ]
 
 @router.get("/customer/{customer_id}", response=CustomerDetailSchema)
 def get_customers(request, customer_id: uuid.UUID):
-    return get_object_or_404(Partner, partnerid=customer_id)
+    customer = get_object_or_404(Partner, partnerid=customer_id)
+    return {
+        "id": customer.partnerid,
+        "name": customer.name,
+        "email": customer.email,
+        "phone": customer.phone,
+        "address": customer.address,
+        "tin_number": customer.tin_number,
+        "contact_person": customer.contact_person,
+        "comments": customer.comments,
+        "partner_type": customer.partner_type,
+    }
 
 
 @router.put("/customer/{customer_id}", response=CustomerDetailSchema, auth=JWTAuth())
@@ -209,11 +233,35 @@ def create_customer(request, payload: CustomerCreateSchema):
 @router.get("/supplier", response=List[SupplierListSchema])
 def list_suppliers(request):
     qs = Partner.objects.filter(partner_type="supplier")
-    return qs
+    return [
+        {
+            "id": s.partnerid,
+            "name": s.name,
+            "email": s.email,
+            "phone": s.phone,
+            "address": s.address,
+            "partner_type": s.partner_type,
+            "tin_number": s.tin_number,
+            "contact_person": s.contact_person,
+            "comments": s.comments,
+        }
+        for s in qs
+    ]
 
 @router.get("/supplier/{supplier_id}", response=SupplierDetailSchema)
 def get_suppliers(request, supplier_id: uuid.UUID):
-    return get_object_or_404(Partner, partnerid=supplier_id)
+    supplier = get_object_or_404(Partner, partnerid=supplier_id)
+    return {
+        "id": supplier.partnerid,
+        "name": supplier.name,
+        "email": supplier.email,
+        "phone": supplier.phone,
+        "address": supplier.address,
+        "tin_number": supplier.tin_number,
+        "contact_person": supplier.contact_person,
+        "comments": supplier.comments,
+        "partner_type": supplier.partner_type,
+    }
 
 
 @router.put("/supplier/{supplier_id}", response=SupplierDetailSchema, auth=JWTAuth())
