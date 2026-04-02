@@ -1457,21 +1457,6 @@ def update_order(request, order_number: str, payload: OrderUpdateSchema):
                 measurement=item.measurement,
             )
 
-    if payload.items is not None:
-        order.items.all().delete()
-        for item in payload.items:
-            OrderItem.objects.create(
-                order=order,
-                order_no=order.order_number,
-                item_name=item.item_name,
-                hs_code=item.hs_code,
-                price=item.price,
-                quantity=item.quantity,
-                total_price=item.total_price,
-                before_vat=item.total_price,
-                measurement=item.measurement,
-            )
-
     return OrderDetailSchema(
         id=order.id,
         order_number=order.order_number,
