@@ -186,6 +186,7 @@ class ShippingInvoice(models.Model):
     packing_list_remark = models.TextField(blank=True, null=True)
     waybill_remark = models.TextField(blank=True, null=True)
     bill_of_lading_remark = models.TextField(blank=True, null=True)
+    bank = models.TextField(blank=True, null=True)
     sr_no = models.PositiveIntegerField(blank=True, null=True)
     authorized_by = models.CharField(max_length=255, blank=True, null=True)
     authorized_at = models.DateTimeField(blank=True, null=True)

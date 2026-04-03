@@ -163,6 +163,20 @@ def _get_customer_address(name: str) -> Optional[str]:
     return None
 
 
+def _get_customer_tin_number(name: str) -> Optional[str]:
+    """Look up customer TIN by name (same matching rules as address)."""
+    key = _normalize_partner_lookup_name(name)
+    if not key:
+        return None
+    for p in Partner.objects.filter(partner_type__in=("customer", "both")).only(
+        "name", "tin_number"
+    ):
+        if _normalize_partner_lookup_name(p.name) == key:
+            tin = (p.tin_number or "").strip()
+            return tin or None
+    return None
+
+
 def _get_supplier_address(name: str) -> Optional[str]:
     """Look up supplier address by name (partner_type in supplier, both)."""
     key = _normalize_partner_lookup_name(name)
@@ -1267,6 +1281,7 @@ def create_order(request, payload: OrderCreateSchema):
         "order_date": order.order_date,
         "buyer": order.buyer,
         "buyer_address": _get_customer_address(order.buyer),
+        "buyer_tin_number": _get_customer_tin_number(order.buyer),
         "proforma_ref_no": order.proforma_ref_no,
         "add_consignee": order.add_consignee,
         "shipper": order.shipper,
@@ -1323,6 +1338,7 @@ def list_orders(request):
                 order_date=o.order_date,
                 buyer=o.buyer,
                 buyer_address=_get_customer_address(o.buyer),
+                buyer_tin_number=_get_customer_tin_number(o.buyer),
                 proforma_ref_no=o.proforma_ref_no,
                 add_consignee=o.add_consignee,
                 shipper=o.shipper,
@@ -1387,6 +1403,7 @@ def get_order_detail(request, order_number: str):
         order_date=order.order_date,
         buyer=order.buyer,
         buyer_address=_get_customer_address(order.buyer),
+        buyer_tin_number=_get_customer_tin_number(order.buyer),
         proforma_ref_no=order.proforma_ref_no,
         add_consignee=order.add_consignee,
         shipper=order.shipper,
@@ -1487,6 +1504,7 @@ def update_order(request, order_number: str, payload: OrderUpdateSchema):
         order_date=order.order_date,
         buyer=order.buyer,
         buyer_address=_get_customer_address(order.buyer),
+        buyer_tin_number=_get_customer_tin_number(order.buyer),
         proforma_ref_no=order.proforma_ref_no,
         add_consignee=order.add_consignee,
         shipper=order.shipper,
@@ -1557,6 +1575,7 @@ def approve_order(request, order_number: str, payload: OrderApproveSchema):
         order_date=order.order_date,
         buyer=order.buyer,
         buyer_address=_get_customer_address(order.buyer),
+        buyer_tin_number=_get_customer_tin_number(order.buyer),
         proforma_ref_no=order.proforma_ref_no,
         add_consignee=order.add_consignee,
         shipper=order.shipper,
@@ -1635,6 +1654,7 @@ def update_order_status(request, order_number: str, payload: OrderStatusUpdateSc
         order_date=order.order_date,
         buyer=order.buyer,
         buyer_address=_get_customer_address(order.buyer),
+        buyer_tin_number=_get_customer_tin_number(order.buyer),
         proforma_ref_no=order.proforma_ref_no,
         add_consignee=order.add_consignee,
         shipper=order.shipper,
@@ -1990,6 +2010,7 @@ def create_shipping_invoice(request, payload: ShippingInvoiceCreateSchema):
         packing_list_remark=payload.packing_list_remark,
         waybill_remark=payload.waybill_remark,
         bill_of_lading_remark=payload.bill_of_lading_remark,
+        bank=payload.bank,
         sr_no=payload.sr_no,
     )
 
@@ -2071,6 +2092,7 @@ def get_shipping_invoice_detail(request, invoice_id: uuid.UUID):
         packing_list_remark=invoice.packing_list_remark,
         waybill_remark=invoice.waybill_remark,
         bill_of_lading_remark=invoice.bill_of_lading_remark,
+        bank=invoice.bank,
         sr_no=invoice.sr_no,
         authorized_by=invoice.authorized_by,
         authorized_at=invoice.authorized_at.isoformat() if invoice.authorized_at else None,
@@ -2118,6 +2140,7 @@ def update_shipping_invoice(
     invoice.packing_list_remark = payload.packing_list_remark
     invoice.waybill_remark = payload.waybill_remark
     invoice.bill_of_lading_remark = payload.bill_of_lading_remark
+    invoice.bank = payload.bank
     invoice.sr_no = payload.sr_no
     invoice.save()
 
@@ -2163,6 +2186,7 @@ def update_shipping_invoice(
         packing_list_remark=invoice.packing_list_remark,
         waybill_remark=invoice.waybill_remark,
         bill_of_lading_remark=invoice.bill_of_lading_remark,
+        bank=invoice.bank,
         sr_no=invoice.sr_no,
         authorized_by=invoice.authorized_by,
         authorized_at=invoice.authorized_at.isoformat() if invoice.authorized_at else None,
@@ -2348,6 +2372,7 @@ def authorize_shipping_invoice(request, invoice_id: uuid.UUID):
         packing_list_remark=invoice.packing_list_remark,
         waybill_remark=invoice.waybill_remark,
         bill_of_lading_remark=invoice.bill_of_lading_remark,
+        bank=invoice.bank,
         sr_no=invoice.sr_no,
         authorized_by=invoice.authorized_by,
         authorized_at=invoice.authorized_at.isoformat() if invoice.authorized_at else None,

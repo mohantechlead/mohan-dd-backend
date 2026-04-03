@@ -233,6 +233,7 @@ class OrderDetailSchema(Schema):
     order_date: date
     buyer: str
     buyer_address: Optional[str] = None
+    buyer_tin_number: Optional[str] = None
     shipper: str
     shipper_address: Optional[str] = None
     proforma_ref_no: str
@@ -454,6 +455,7 @@ class ShippingInvoiceCreateSchema(Schema):
     packing_list_remark: Optional[str]
     waybill_remark: Optional[str]
     bill_of_lading_remark: Optional[str]
+    bank: Optional[str] = None
     sr_no: Optional[int] = None
     items: List[ShippingInvoiceItemCreateSchema]
 
@@ -474,6 +476,7 @@ class ShippingInvoiceUpdateSchema(Schema):
     packing_list_remark: Optional[str]
     waybill_remark: Optional[str]
     bill_of_lading_remark: Optional[str]
+    bank: Optional[str] = None
     sr_no: Optional[int] = None
     items: List[ShippingInvoiceItemCreateSchema]
 
@@ -524,6 +527,7 @@ class ShippingInvoiceDetailSchema(Schema):
     packing_list_remark: Optional[str]
     waybill_remark: Optional[str]
     bill_of_lading_remark: Optional[str]
+    bank: Optional[str] = None
     sr_no: Optional[int] = None
     authorized_by: Optional[str] = None
     authorized_at: Optional[str] = None
