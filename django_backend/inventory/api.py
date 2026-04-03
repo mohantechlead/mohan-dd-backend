@@ -137,20 +137,44 @@ def _require_admin(request):
     return None
 
 
+def _normalize_partner_lookup_name(name: str) -> str:
+    """Collapse internal whitespace and trim; case-insensitive matching uses .lower()."""
+    if not name:
+        return ""
+    return " ".join(str(name).strip().split()).lower()
+
+
 def _get_customer_address(name: str) -> Optional[str]:
-    """Look up customer address by name (partner_type in customer, both)."""
-    p = Partner.objects.filter(name__iexact=name.strip()).filter(
-        partner_type__in=("customer", "both")
-    ).first()
-    return p.address if p and p.address else None
+    """Look up customer address by name (partner_type in customer, both).
+
+    Uses whitespace-normalized comparison so order.buyer can still match Partner.name
+    when spacing differs (e.g. double spaces, trailing space). Plain iexact alone
+    often fails for imported or hand-typed names.
+    """
+    key = _normalize_partner_lookup_name(name)
+    if not key:
+        return None
+    for p in Partner.objects.filter(partner_type__in=("customer", "both")).only(
+        "name", "address"
+    ):
+        if _normalize_partner_lookup_name(p.name) == key:
+            addr = (p.address or "").strip()
+            return addr or None
+    return None
 
 
 def _get_supplier_address(name: str) -> Optional[str]:
     """Look up supplier address by name (partner_type in supplier, both)."""
-    p = Partner.objects.filter(name__iexact=name.strip()).filter(
-        partner_type__in=("supplier", "both")
-    ).first()
-    return p.address if p and p.address else None
+    key = _normalize_partner_lookup_name(name)
+    if not key:
+        return None
+    for p in Partner.objects.filter(partner_type__in=("supplier", "both")).only(
+        "name", "address"
+    ):
+        if _normalize_partner_lookup_name(p.name) == key:
+            addr = (p.address or "").strip()
+            return addr or None
+    return None
 
 
 def _check_and_notify_negative_stock():
