@@ -7,6 +7,7 @@ from typing import List, Optional
 from datetime import datetime
 from datetime import datetime
 from django.shortcuts import get_object_or_404
+from django.db.models import Q
 from django.core.mail import send_mail
 from django.conf import settings
 
@@ -453,7 +454,8 @@ def _check_and_notify_negative_stock():
 def _validate_grn_items(items):
     """
     Ensure every GRN item row is a real item from the item list.
-    We validate by `(internal_code, item_name)` and require `quantity > 0`.
+    Match by (item_name + internal_code) when code is set; when internal_code is empty,
+    match items whose stored internal_code is null or blank (Items allows blank/null).
     """
     if not items:
         raise ValueError("At least one GRN item is required.")
@@ -462,7 +464,7 @@ def _validate_grn_items(items):
     for item in items:
         item_name = str(getattr(item, "item_name", "") or "").strip()
         internal_code = str(getattr(item, "internal_code", "") or "").strip()
-        if not item_name or not internal_code:
+        if not item_name:
             raise ValueError("Each GRN item must be selected from the item list.")
 
         try:
@@ -473,11 +475,17 @@ def _validate_grn_items(items):
         if quantity <= 0:
             raise ValueError("Each GRN item quantity must be greater than 0.")
 
-        # Verify (internal_code + item_name) matches an existing item.
-        if not Items.objects.filter(
-            internal_code=internal_code,
-            item_name__iexact=item_name,
-        ).exists():
+        if internal_code:
+            exists = Items.objects.filter(
+                internal_code=internal_code,
+                item_name__iexact=item_name,
+            ).exists()
+        else:
+            exists = Items.objects.filter(item_name__iexact=item_name).filter(
+                Q(internal_code__isnull=True) | Q(internal_code="")
+            ).exists()
+
+        if not exists:
             raise ValueError(f"Item '{item_name}' is not in the item list.")
 
         unit_measurement = getattr(item, "unit_measurement", "") or ""
@@ -506,7 +514,7 @@ def _validate_grn_items(items):
 def _validate_dn_items(items):
     """
     Ensure every DN item row is a real item from the item list.
-    We validate by `(internal_code, item_name)` and require `quantity > 0`.
+    Same rules as GRN: internal_code may be empty when the master item has no code.
     """
     if not items:
         raise ValueError("At least one DN item is required.")
@@ -515,7 +523,7 @@ def _validate_dn_items(items):
     for item in items:
         item_name = str(getattr(item, "item_name", "") or "").strip()
         internal_code = str(getattr(item, "internal_code", "") or "").strip()
-        if not item_name or not internal_code:
+        if not item_name:
             raise ValueError("Each DN item must be selected from the item list.")
 
         try:
@@ -526,10 +534,17 @@ def _validate_dn_items(items):
         if quantity <= 0:
             raise ValueError("Each DN item quantity must be greater than 0.")
 
-        if not Items.objects.filter(
-            internal_code=internal_code,
-            item_name__iexact=item_name,
-        ).exists():
+        if internal_code:
+            exists = Items.objects.filter(
+                internal_code=internal_code,
+                item_name__iexact=item_name,
+            ).exists()
+        else:
+            exists = Items.objects.filter(item_name__iexact=item_name).filter(
+                Q(internal_code__isnull=True) | Q(internal_code="")
+            ).exists()
+
+        if not exists:
             raise ValueError(f"Item '{item_name}' is not in the item list.")
 
         unit_measurement = getattr(item, "unit_measurement", "") or ""
