@@ -247,11 +247,7 @@ def _check_and_notify_negative_stock():
             message=message,
             from_email=settings.DEFAULT_FROM_EMAIL,
             recipient_list=[
-                "sol@mohanplc.com",
-                "Kapil@mohanint.com",
-                "Harsh@mohanplc.com",
-                "Mayuraddis@gmail.com",
-                "Amritakaur2612@gmail.com",
+"mekdi1610@gmail.com"
             ],
             fail_silently=True,
         )
@@ -435,11 +431,7 @@ def _check_and_notify_negative_stock():
             message=message,
             from_email=settings.DEFAULT_FROM_EMAIL,
             recipient_list=[
-                "sol@mohanplc.com",
-                "Kapil@mohanint.com",
-                "Harsh@mohanplc.com",
-                "Mayuraddis@gmail.com",
-                "Amritakaur2612@gmail.com",
+"mekdi1610@gmail.com"
             ],
             fail_silently=True,
         )
