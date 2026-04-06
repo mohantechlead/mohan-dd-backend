@@ -63,6 +63,8 @@ class DN(models.Model):
 
 class DNItems(models.Model):
     item_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
+    # Links to Items.item_id for stock; line item_id stays unique per DN row.
+    catalog_item_id = models.UUIDField(null=True, blank=True, db_index=True)
     dn = models.ForeignKey(DN, on_delete=models.CASCADE, related_name='dn_items')
     item_name = models.CharField(max_length=255)
     quantity = models.IntegerField()

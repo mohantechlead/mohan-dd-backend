@@ -5,6 +5,7 @@ from datetime import date
 
 # Item schema sent from React
 class GrnItemCreateSchema(Schema):
+    item_id: Optional[uuid.UUID] = None
     item_name: str
     quantity: int
     unit_measurement: str
@@ -94,6 +95,7 @@ class GRNListSchema(Schema):
 
 # DN Schemas
 class DnItemCreateSchema(Schema):
+    item_id: Optional[uuid.UUID] = None
     item_name: str
     quantity: int
     unit_measurement: str
@@ -179,6 +181,7 @@ class ItemSchema(Schema):
     internal_code: str | None = None
     
 class StockSchema(Schema):
+    item_id: Optional[uuid.UUID] = None
     item_name: str
     internal_code: Optional[str]
     quantity: Optional[float]

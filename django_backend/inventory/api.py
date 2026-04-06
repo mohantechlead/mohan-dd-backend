@@ -192,71 +192,71 @@ def _get_supplier_address(name: str) -> Optional[str]:
     return None
 
 
-def _check_and_notify_negative_stock():
-    """Check if any item has negative stock and send email notification if so."""
-    items = Items.objects.all()
-    negative_items = []
+def _resolve_catalog_item(row) -> Items:
+    """Map a GRN/DN payload row to a catalog Items row (prefer item_id from UI)."""
+    item_name = str(getattr(row, "item_name", "") or "").strip()
+    internal_code = str(getattr(row, "internal_code", "") or "").strip()
+    if not item_name:
+        raise ValueError("Each line must be selected from the item list.")
 
-    for item in items:
-        grn_totals = GrnItems.objects.filter(
-            internal_code=item.internal_code
-        ).aggregate(
-            quantity=Sum("quantity"),
-            bags=Sum("bags")
+    raw_uid = getattr(row, "item_id", None)
+    if raw_uid is not None and str(raw_uid).strip():
+        try:
+            uid = uuid.UUID(str(raw_uid))
+        except (ValueError, TypeError, AttributeError):
+            uid = None
+        if uid:
+            catalog = Items.objects.filter(item_id=uid).first()
+            if not catalog:
+                raise ValueError(f"Unknown item_id for '{item_name}'.")
+            if catalog.item_name.strip().lower() != item_name.lower():
+                raise ValueError(
+                    "Item name does not match the selected inventory item (item_id)."
+                )
+            return catalog
+
+    if internal_code:
+        catalog = Items.objects.filter(
+            internal_code=internal_code,
+            item_name__iexact=item_name,
+        ).first()
+    else:
+        catalog = (
+            Items.objects.filter(item_name__iexact=item_name)
+            .filter(Q(internal_code__isnull=True) | Q(internal_code=""))
+            .first()
         )
-        dn_totals = DNItems.objects.filter(
-            internal_code=item.internal_code
-        ).aggregate(
-            quantity=Sum("quantity"),
-            bags=Sum("bags")
-        )
+    if not catalog:
+        raise ValueError(f"Item '{item_name}' is not in the item list.")
+    return catalog
 
-        grn_qty = grn_totals["quantity"] or 0
-        grn_bags = grn_totals["bags"] or 0
-        dn_qty = dn_totals["quantity"] or 0
-        dn_bags = dn_totals["bags"] or 0
 
-        stock_quantity = grn_qty - dn_qty
-        stock_bags = grn_bags - dn_bags
-
-        if stock_quantity < 0 or stock_bags < 0:
-            negative_items.append({
-                "item_name": item.item_name,
-                "internal_code": item.internal_code or "",
-                "quantity": stock_quantity,
-                "package": stock_bags,
-            })
-
-    if not negative_items:
-        return
-
-    try:
-        lines = [
-            "The following items have negative stock:",
-            "",
-        ]
-        for ni in negative_items:
-            lines.append(
-                f"  - {ni['item_name']} (code: {ni['internal_code']}): "
-                f"quantity={ni['quantity']}, package={ni['package']}"
+def _stock_totals_for_catalog_row(item: Items, catalog_ids: list) -> tuple[int, float, int, float]:
+    """Return (grn_qty, grn_bags, dn_qty, dn_bags) for one catalog item."""
+    grn_totals = (
+        GrnItems.objects.filter(
+            Q(item_id=item.item_id)
+            | (
+                Q(item_name__iexact=item.item_name)
+                & ~Q(item_id__in=catalog_ids)
             )
-        message = "\n".join(lines)
+        ).aggregate(quantity=Sum("quantity"), bags=Sum("bags"))
+    )
+    dn_totals = (
+        DNItems.objects.filter(
+            Q(catalog_item_id=item.item_id)
+            | (
+                Q(catalog_item_id__isnull=True)
+                & Q(item_name__iexact=item.item_name)
+            )
+        ).aggregate(quantity=Sum("quantity"), bags=Sum("bags"))
+    )
 
-        sent = send_mail(
-            subject="Negative Stock Alert",
-            message=message,
-            from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[
-"mekdi1610@gmail.com"
-            ],
-            fail_silently=True,
-        )
-        if sent > 0:
-            logger.info("Negative stock alert email sent to recipients")
-        else:
-            logger.warning("Negative stock alert email sent count was 0")
-    except Exception as e:
-        logger.exception("Failed to send negative stock alert email: %s", e)
+    grn_qty = grn_totals["quantity"] or 0
+    grn_bags = float(grn_totals["bags"] or 0)
+    dn_qty = dn_totals["quantity"] or 0
+    dn_bags = float(dn_totals["bags"] or 0)
+    return grn_qty, grn_bags, dn_qty, dn_bags
 
 
 def _check_and_notify_over_under_delivery(dn):
@@ -380,26 +380,12 @@ def _check_and_notify_negative_stock():
     """Check if any item has negative stock and send email notification if so."""
     items = Items.objects.all()
     negative_items = []
+    catalog_ids = list(Items.objects.values_list("item_id", flat=True))
 
     for item in items:
-        grn_totals = GrnItems.objects.filter(
-            internal_code=item.internal_code
-        ).aggregate(
-            quantity=Sum("quantity"),
-            bags=Sum("bags")
+        grn_qty, grn_bags, dn_qty, dn_bags = _stock_totals_for_catalog_row(
+            item, catalog_ids
         )
-        dn_totals = DNItems.objects.filter(
-            internal_code=item.internal_code
-        ).aggregate(
-            quantity=Sum("quantity"),
-            bags=Sum("bags")
-        )
-
-        grn_qty = grn_totals["quantity"] or 0
-        grn_bags = grn_totals["bags"] or 0
-        dn_qty = dn_totals["quantity"] or 0
-        dn_bags = dn_totals["bags"] or 0
-
         stock_quantity = grn_qty - dn_qty
         stock_bags = grn_bags - dn_bags
 
@@ -445,20 +431,13 @@ def _check_and_notify_negative_stock():
 
 def _validate_grn_items(items):
     """
-    Ensure every GRN item row is a real item from the item list.
-    Match by (item_name + internal_code) when code is set; when internal_code is empty,
-    match items whose stored internal_code is null or blank (Items allows blank/null).
+    Ensure every GRN item row maps to a catalog Items row (prefer payload item_id).
     """
     if not items:
         raise ValueError("At least one GRN item is required.")
 
     validated = []
     for item in items:
-        item_name = str(getattr(item, "item_name", "") or "").strip()
-        internal_code = str(getattr(item, "internal_code", "") or "").strip()
-        if not item_name:
-            raise ValueError("Each GRN item must be selected from the item list.")
-
         try:
             quantity = int(getattr(item, "quantity", 0) or 0)
         except (TypeError, ValueError):
@@ -467,18 +446,9 @@ def _validate_grn_items(items):
         if quantity <= 0:
             raise ValueError("Each GRN item quantity must be greater than 0.")
 
-        if internal_code:
-            exists = Items.objects.filter(
-                internal_code=internal_code,
-                item_name__iexact=item_name,
-            ).exists()
-        else:
-            exists = Items.objects.filter(item_name__iexact=item_name).filter(
-                Q(internal_code__isnull=True) | Q(internal_code="")
-            ).exists()
-
-        if not exists:
-            raise ValueError(f"Item '{item_name}' is not in the item list.")
+        catalog = _resolve_catalog_item(item)
+        item_name = catalog.item_name
+        internal_code = str(catalog.internal_code or "").strip()
 
         unit_measurement = getattr(item, "unit_measurement", "") or ""
 
@@ -497,6 +467,7 @@ def _validate_grn_items(items):
                 "unit_measurement": unit_measurement,
                 "internal_code": internal_code,
                 "bags": bags_val,
+                "catalog_item_id": catalog.item_id,
             }
         )
 
@@ -504,20 +475,12 @@ def _validate_grn_items(items):
 
 
 def _validate_dn_items(items):
-    """
-    Ensure every DN item row is a real item from the item list.
-    Same rules as GRN: internal_code may be empty when the master item has no code.
-    """
+    """Ensure every DN item row maps to a catalog Items row (prefer payload item_id)."""
     if not items:
         raise ValueError("At least one DN item is required.")
 
     validated = []
     for item in items:
-        item_name = str(getattr(item, "item_name", "") or "").strip()
-        internal_code = str(getattr(item, "internal_code", "") or "").strip()
-        if not item_name:
-            raise ValueError("Each DN item must be selected from the item list.")
-
         try:
             quantity = int(getattr(item, "quantity", 0) or 0)
         except (TypeError, ValueError):
@@ -526,18 +489,9 @@ def _validate_dn_items(items):
         if quantity <= 0:
             raise ValueError("Each DN item quantity must be greater than 0.")
 
-        if internal_code:
-            exists = Items.objects.filter(
-                internal_code=internal_code,
-                item_name__iexact=item_name,
-            ).exists()
-        else:
-            exists = Items.objects.filter(item_name__iexact=item_name).filter(
-                Q(internal_code__isnull=True) | Q(internal_code="")
-            ).exists()
-
-        if not exists:
-            raise ValueError(f"Item '{item_name}' is not in the item list.")
+        catalog = _resolve_catalog_item(item)
+        item_name = catalog.item_name
+        internal_code = str(catalog.internal_code or "").strip()
 
         unit_measurement = getattr(item, "unit_measurement", "") or ""
 
@@ -555,6 +509,7 @@ def _validate_dn_items(items):
                 "unit_measurement": unit_measurement,
                 "internal_code": internal_code,
                 "bags": bags_val,
+                "catalog_item_id": catalog.item_id,
             }
         )
 
@@ -614,7 +569,7 @@ def create_grn(request, payload: GrnCreateSchema):
         created_items = []
         for item in validated_items:
             new_item = GrnItems.objects.create(
-                item_id=uuid.uuid4(),
+                item_id=item["catalog_item_id"],
                 grn=grn,
                 grn_no=grn.grn_no,
                 item_name=item["item_name"],
@@ -721,7 +676,7 @@ def update_GRN(request, grn_no: str, payload: GrnUpdateSchema):
 
         for item in validated_items:
             GrnItems.objects.create(
-                item_id=uuid.uuid4(),
+                item_id=item["catalog_item_id"],
                 grn=grn,
                 grn_no=grn.grn_no,
                 item_name=item["item_name"],
@@ -747,7 +702,6 @@ def delete_GRN(request, grn_no: str):
         return err
     grn = get_object_or_404(GRN, grn_no=int(grn_no) if grn_no.isdigit() else grn_no)
     grn.delete()
-    _check_and_notify_negative_stock()
     _check_and_notify_negative_stock()
     return {"detail": "GRN deleted successfully."}
 
@@ -887,6 +841,7 @@ def create_dn(request, payload: DnCreateSchema):
     for item in validated_items:
         new_item = DNItems.objects.create(
             item_id=uuid.uuid4(),
+            catalog_item_id=item["catalog_item_id"],
             dn=dn,
             item_name=item["item_name"],
             quantity=item["quantity"],
@@ -1030,6 +985,7 @@ def update_DN(request, dn_no: str, payload: DnUpdateSchema):
         for item in validated_items:
             DNItems.objects.create(
                 item_id=uuid.uuid4(),
+                catalog_item_id=item["catalog_item_id"],
                 dn=dn,
                 item_name=item["item_name"],
                 quantity=item["quantity"],
@@ -1039,15 +995,6 @@ def update_DN(request, dn_no: str, payload: DnUpdateSchema):
             )
     dn.save()
     dn.refresh_from_db()
-    _check_and_notify_negative_stock()
-    over_items, under_items = _check_and_notify_over_under_delivery(dn)
-
-    result = _dn_to_detail(dn)
-    if over_items:
-        result["over_items"] = over_items
-    if under_items:
-        result["under_items"] = under_items
-    return result
     _check_and_notify_negative_stock()
     over_items, under_items = _check_and_notify_over_under_delivery(dn)
 
@@ -1182,43 +1129,20 @@ def delete_item(request, item_id: uuid.UUID):
 
 @router.get("/stock", response=list[StockSchema])
 def display_stock(request):
-    grns = GrnItems.objects.all()
-    dns = DNItems.objects.all()
     items = Items.objects.all()
-
+    catalog_ids = list(Items.objects.values_list("item_id", flat=True))
     stock_list = []
 
     for item in items:
-        # matching GRN and DN for this item
-        grn_totals = GrnItems.objects.filter(
-            internal_code=item.internal_code
-        ).aggregate(
-            quantity=Sum("quantity"),
-            bags=Sum("bags")
+        grn_qty, grn_bags, dn_qty, dn_bags = _stock_totals_for_catalog_row(
+            item, catalog_ids
         )
-
-        dn_totals = DNItems.objects.filter(
-            internal_code=item.internal_code
-        ).aggregate(
-            quantity=Sum("quantity"),
-            bags=Sum("bags")
-        )
-
-        grn_qty = grn_totals["quantity"] or 0
-        grn_bags = grn_totals["bags"] or 0
-
-        dn_qty = dn_totals["quantity"] or 0
-        dn_bags = dn_totals["bags"] or 0
-
-        stock_quantity = 0
-        stock_bags = 0
-        item_name = item.item_name
-
         stock_quantity = grn_qty - dn_qty
         stock_bags = grn_bags - dn_bags
 
         stock_list.append({
-            "item_name": item_name,
+            "item_id": item.item_id,
+            "item_name": item.item_name,
             "quantity": stock_quantity,
             "package": stock_bags,
             "hscode": item.hscode,
