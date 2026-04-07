@@ -120,8 +120,8 @@ class Order(models.Model):
     shipment_type = models.CharField(max_length=50)
     # Sales aggregates: PR_before_VAT = sum(line total_price); remaining mirrors total_quantity for now.
     PR_before_VAT = models.DecimalField(max_digits=14, decimal_places=2, default=0)
-    total_quantity = models.IntegerField(default=0)
-    remaining = models.IntegerField(default=0)
+    total_quantity = models.FloatField(default=0)
+    remaining = models.FloatField(default=0)
     status = models.CharField(max_length=20, default="pending")
     approved_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -160,7 +160,7 @@ class OrderItem(models.Model):
     item_name = models.CharField(max_length=255)
     hs_code = models.CharField(max_length=255)
     price = models.DecimalField(max_digits=12, decimal_places=2)
-    quantity = models.IntegerField()
+    quantity = models.FloatField()
     total_price = models.DecimalField(max_digits=12, decimal_places=2)
     before_vat = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     measurement = models.CharField(max_length=100)
@@ -203,7 +203,7 @@ class ShippingInvoiceItem(models.Model):
     item_id = models.UUIDField(blank=True, null=True, db_index=True)
     item_name = models.CharField(max_length=255)
     price = models.DecimalField(max_digits=12, decimal_places=2)
-    quantity = models.IntegerField()
+    quantity = models.FloatField()
     total_price = models.DecimalField(max_digits=12, decimal_places=2)
     measurement = models.CharField(max_length=100)
     bags = models.FloatField(blank=True, null=True)

@@ -88,10 +88,10 @@ def _purchase_aggregate_from_line_items(items) -> tuple[Decimal, int, int]:
     return before_vat, qty_sum, qty_sum
 
 
-def _order_aggregate_from_line_items(items) -> tuple[Decimal, int, int]:
+def _order_aggregate_from_line_items(items) -> tuple[Decimal, float, float]:
     """PR_before_VAT = sum(total_price); remaining mirrors total_quantity for now."""
     pr_before_vat = sum(Decimal(str(i.total_price)) for i in items)
-    qty_sum = sum(int(i.quantity) for i in items)
+    qty_sum = sum(float(i.quantity) for i in items)
     return pr_before_vat, qty_sum, qty_sum
 
 

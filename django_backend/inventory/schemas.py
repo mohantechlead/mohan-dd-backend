@@ -192,7 +192,7 @@ class OrderItemCreateSchema(Schema):
     item_name: str
     hs_code: str
     price: float
-    quantity: int
+    quantity: float
     total_price: float
     measurement: str
 
@@ -224,7 +224,7 @@ class OrderItemSchema(Schema):
     item_name: str
     hs_code: str
     price: float
-    quantity: int
+    quantity: float
     total_price: float
     before_vat: float
     measurement: str
@@ -254,8 +254,8 @@ class OrderDetailSchema(Schema):
     freight_price: Optional[float]
     shipment_type: str
     PR_before_VAT: float
-    total_quantity: int
-    remaining: int
+    total_quantity: float
+    remaining: float
     status: Optional[str] = None
     approved_by: Optional[str] = None
     approval_date: Optional[str] = None
@@ -428,7 +428,7 @@ class ShippingInvoiceItemCreateSchema(Schema):
     item_id: uuid.UUID | None = None
     item_name: str
     price: float
-    quantity: int
+    quantity: float
     total_price: float
     measurement: str
     bags: Optional[float]
@@ -499,7 +499,7 @@ class ShippingInvoiceItemSchema(Schema):
     item_id: uuid.UUID | None = None
     item_name: str
     price: float
-    quantity: int
+    quantity: float
     total_price: float
     measurement: str
     bags: Optional[float]
