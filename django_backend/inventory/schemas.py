@@ -256,7 +256,7 @@ class OrderDetailSchema(Schema):
     PR_before_VAT: float
     total_quantity: int
     remaining: int
-    status: str
+    status: Optional[str] = None
     approved_by: Optional[str] = None
     approval_date: Optional[str] = None
     completed_by: Optional[str] = None
@@ -357,7 +357,7 @@ class PurchaseDetailSchema(Schema):
     buyer: str
     buyer_address: Optional[str] = None
     proforma_ref_no: str
-    status: str
+    status: Optional[str] = None
     approved_by: Optional[str] = None
     approval_date: Optional[str] = None
     completed_by: Optional[str] = None

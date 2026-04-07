@@ -138,6 +138,14 @@ def _require_admin(request):
     return None
 
 
+def _is_admin(request) -> bool:
+    user = getattr(request, "user", None)
+    if not user or not getattr(user, "is_authenticated", False):
+        return False
+    role = getattr(user, "role", "logistics")
+    return role == "admin" or getattr(user, "is_superuser", False)
+
+
 def _normalize_partner_lookup_name(name: str) -> str:
     """Collapse internal whitespace and trim; case-insensitive matching uses .lower()."""
     if not name:
@@ -707,6 +715,7 @@ def delete_GRN(request, grn_no: str):
 
 
 def _grn_to_detail(grn):
+    admin_view = _is_admin(request)
     return {
         "id": grn.id,
         "supplier_name": grn.supplier_name,
@@ -1232,14 +1241,14 @@ def create_order(request, payload: OrderCreateSchema):
         "PR_before_VAT": float(order.PR_before_VAT),
         "total_quantity": order.total_quantity,
         "remaining": order.remaining,
-        "status": order.status,
-        "approved_by": order.approved_by.username if order.approved_by else None,
-        "approval_date": order.approval_date.isoformat() if order.approval_date else None,
-        "completed_by": order.completed_by.username if order.completed_by else None,
-        "completed_date": order.completed_date.isoformat() if order.completed_date else None,
-        "cancelled_by": order.cancelled_by.username if order.cancelled_by else None,
-        "cancelled_date": order.cancelled_date.isoformat() if order.cancelled_date else None,
-        "status_remark": order.status_remark,
+        "status": order.status if admin_view else None,
+        "approved_by": order.approved_by.username if admin_view and order.approved_by else None,
+        "approval_date": order.approval_date.isoformat() if admin_view and order.approval_date else None,
+        "completed_by": order.completed_by.username if admin_view and order.completed_by else None,
+        "completed_date": order.completed_date.isoformat() if admin_view and order.completed_date else None,
+        "cancelled_by": order.cancelled_by.username if admin_view and order.cancelled_by else None,
+        "cancelled_date": order.cancelled_date.isoformat() if admin_view and order.cancelled_date else None,
+        "status_remark": order.status_remark if admin_view else None,
         "items": [
             OrderItemSchema(
                 order_no=i.order_no,
@@ -1260,6 +1269,7 @@ def create_order(request, payload: OrderCreateSchema):
 def list_orders(request):
     # Sort newest orders first by order number (descending).
     orders = Order.objects.prefetch_related("items").order_by("-order_number")
+    admin_view = _is_admin(request)
     result: list[OrderDetailSchema] = []
     for o in orders:
         result.append(
@@ -1289,14 +1299,14 @@ def list_orders(request):
                 PR_before_VAT=float(o.PR_before_VAT),
                 total_quantity=o.total_quantity,
                 remaining=o.remaining,
-                status=o.status,
-                approved_by=o.approved_by.username if o.approved_by else None,
-                approval_date=o.approval_date.isoformat() if o.approval_date else None,
-                completed_by=o.completed_by.username if o.completed_by else None,
-                completed_date=o.completed_date.isoformat() if o.completed_date else None,
-                cancelled_by=o.cancelled_by.username if o.cancelled_by else None,
-                cancelled_date=o.cancelled_date.isoformat() if o.cancelled_date else None,
-                status_remark=o.status_remark,
+                status=o.status if admin_view else None,
+                approved_by=o.approved_by.username if admin_view and o.approved_by else None,
+                approval_date=o.approval_date.isoformat() if admin_view and o.approval_date else None,
+                completed_by=o.completed_by.username if admin_view and o.completed_by else None,
+                completed_date=o.completed_date.isoformat() if admin_view and o.completed_date else None,
+                cancelled_by=o.cancelled_by.username if admin_view and o.cancelled_by else None,
+                cancelled_date=o.cancelled_date.isoformat() if admin_view and o.cancelled_date else None,
+                status_remark=o.status_remark if admin_view else None,
                 items=[
                     OrderItemSchema(
                         order_no=i.order_no,
@@ -1324,6 +1334,7 @@ def next_order_number(request):
 
 @router.get("/orders/{order_number}", response=OrderDetailSchema)
 def get_order_detail(request, order_number: str):
+    admin_view = _is_admin(request)
     order = get_object_or_404(
         Order.objects.prefetch_related("items"),
         order_number__iexact=order_number.strip(),
@@ -1354,14 +1365,14 @@ def get_order_detail(request, order_number: str):
         PR_before_VAT=float(order.PR_before_VAT),
         total_quantity=order.total_quantity,
         remaining=order.remaining,
-        status=order.status,
-        approved_by=order.approved_by.username if order.approved_by else None,
-        approval_date=order.approval_date.isoformat() if order.approval_date else None,
-        completed_by=order.completed_by.username if order.completed_by else None,
-        completed_date=order.completed_date.isoformat() if order.completed_date else None,
-        cancelled_by=order.cancelled_by.username if order.cancelled_by else None,
-        cancelled_date=order.cancelled_date.isoformat() if order.cancelled_date else None,
-        status_remark=order.status_remark,
+        status=order.status if admin_view else None,
+        approved_by=order.approved_by.username if admin_view and order.approved_by else None,
+        approval_date=order.approval_date.isoformat() if admin_view and order.approval_date else None,
+        completed_by=order.completed_by.username if admin_view and order.completed_by else None,
+        completed_date=order.completed_date.isoformat() if admin_view and order.completed_date else None,
+        cancelled_by=order.cancelled_by.username if admin_view and order.cancelled_by else None,
+        cancelled_date=order.cancelled_date.isoformat() if admin_view and order.cancelled_date else None,
+        status_remark=order.status_remark if admin_view else None,
         items=[
             OrderItemSchema(
                 order_no=i.order_no,
@@ -1698,7 +1709,7 @@ def create_purchase(request, payload: PurchaseCreateSchema):
         )
         created_items.append(new_item)
 
-    return _purchase_to_detail_schema(purchase)
+    return _purchase_to_detail_schema(purchase, request)
 
 
 @router.get("/purchases/next-number")
@@ -1714,7 +1725,7 @@ def get_purchase_detail(request, purchase_number: str):
         Purchase.objects.prefetch_related("items"),
         purchase_number__iexact=purchase_number.strip(),
     )
-    return _purchase_to_detail_schema(purchase)
+    return _purchase_to_detail_schema(purchase, request)
 
 
 @router.delete("/purchases/{purchase_number}", auth=JWTAuth())
@@ -1740,11 +1751,12 @@ def approve_purchase(request, purchase_number: str, payload: PurchaseApproveSche
     purchase.approved_by_id = payload.approved_by_id
     purchase.approval_date = timezone.now()
     purchase.save()
-    return _purchase_to_detail_schema(purchase)
+    return _purchase_to_detail_schema(purchase, request)
 
 
-def _purchase_to_detail_schema(purchase):
+def _purchase_to_detail_schema(purchase, request=None):
     payment_value = purchase.payment_terms
+    admin_view = _is_admin(request) if request is not None else False
     return PurchaseDetailSchema(
         id=purchase.id,
         purchase_number=purchase.purchase_number,
@@ -1752,14 +1764,14 @@ def _purchase_to_detail_schema(purchase):
         buyer=purchase.buyer,
         buyer_address=_get_customer_address(purchase.buyer),
         proforma_ref_no=purchase.proforma_ref_no,
-        status=purchase.status,
-        approved_by=purchase.approved_by.username if purchase.approved_by else None,
-        approval_date=purchase.approval_date.isoformat() if purchase.approval_date else None,
-        completed_by=purchase.completed_by.username if purchase.completed_by else None,
-        completed_date=purchase.completed_date.isoformat() if purchase.completed_date else None,
-        cancelled_by=purchase.cancelled_by.username if purchase.cancelled_by else None,
-        cancelled_date=purchase.cancelled_date.isoformat() if purchase.cancelled_date else None,
-        status_remark=purchase.status_remark,
+        status=purchase.status if admin_view else None,
+        approved_by=purchase.approved_by.username if admin_view and purchase.approved_by else None,
+        approval_date=purchase.approval_date.isoformat() if admin_view and purchase.approval_date else None,
+        completed_by=purchase.completed_by.username if admin_view and purchase.completed_by else None,
+        completed_date=purchase.completed_date.isoformat() if admin_view and purchase.completed_date else None,
+        cancelled_by=purchase.cancelled_by.username if admin_view and purchase.cancelled_by else None,
+        cancelled_date=purchase.cancelled_date.isoformat() if admin_view and purchase.cancelled_date else None,
+        status_remark=purchase.status_remark if admin_view else None,
         add_consignee=purchase.add_consignee,
         shipper=purchase.shipper,
         shipper_address=_get_supplier_address(purchase.shipper),
@@ -1862,7 +1874,7 @@ def update_purchase(request, purchase_number: str, payload: PurchaseUpdateSchema
         )
 
     purchase.refresh_from_db()
-    return _purchase_to_detail_schema(purchase)
+    return _purchase_to_detail_schema(purchase, request)
 
 
 @router.post("/purchases/{purchase_number}/update-status", response=PurchaseDetailSchema, auth=JWTAuth())
@@ -1893,7 +1905,7 @@ def update_purchase_status(request, purchase_number: str, payload: PurchaseStatu
         purchase.cancelled_by_id = payload.user_id
         purchase.cancelled_date = timezone.now()
     purchase.save()
-    return _purchase_to_detail_schema(purchase)
+    return _purchase_to_detail_schema(purchase, request)
 
 
 @router.get("/purchases", response=List[PurchaseDetailSchema])
@@ -1902,7 +1914,7 @@ def list_purchases(request):
     purchases = Purchase.objects.prefetch_related("items").order_by("-purchase_number")
     result: list[PurchaseDetailSchema] = []
     for p in purchases:
-        result.append(_purchase_to_detail_schema(p))
+        result.append(_purchase_to_detail_schema(p, request))
     return result
 
 

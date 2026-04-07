@@ -7,6 +7,7 @@ from ninja_jwt.authentication import JWTAuth
 from ninja_jwt.controller import NinjaJWTDefaultController
 from django.http import JsonResponse
 from accounts.api import router as accounts_router
+from accounting.api import router as accounting_router
 from inventory.api import router as inventory_router
 
 logger = logging.getLogger(__name__)
@@ -24,6 +25,7 @@ def global_exception_handler(request, exc):
     )
 api.register_controllers(NinjaJWTDefaultController)
 api.add_router("/partners/", accounts_router)
+api.add_router("/accounting/", accounting_router)
 api.add_router("/inventory/", inventory_router)
 
 

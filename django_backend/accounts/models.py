@@ -10,6 +10,7 @@ class User(AbstractUser):
         ("inventory", "Inventory"),
         ("logistics", "Logistics"),
         ("store", "Store"),
+        ("accounting", "Accounting"),
     )
 
     role = models.CharField(max_length=20, choices=ROLE_CHOICES, default="logistics")

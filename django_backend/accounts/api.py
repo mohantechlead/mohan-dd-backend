@@ -13,7 +13,7 @@ router = Router()
 
 User = get_user_model()
 
-ROLE_CHOICES = ["admin", "sales", "purchasing", "inventory", "logistics", "store"]
+ROLE_CHOICES = ["admin", "sales", "purchasing", "inventory", "logistics", "store", "accounting"]
 
 
 def _require_admin(request):

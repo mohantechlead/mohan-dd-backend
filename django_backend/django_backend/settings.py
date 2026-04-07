@@ -95,6 +95,7 @@ INSTALLED_APPS = [
 
     # internal
     "accounts",
+    "accounting",
     "inventory",
 ]
 
