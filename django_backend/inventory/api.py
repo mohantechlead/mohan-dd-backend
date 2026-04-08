@@ -240,24 +240,29 @@ def _resolve_catalog_item(row) -> Items:
 
 
 def _stock_totals_for_catalog_row(item: Items, catalog_ids: list) -> tuple[int, float, int, float]:
-    """Return (grn_qty, grn_bags, dn_qty, dn_bags) for one catalog item."""
-    grn_totals = (
-        GrnItems.objects.filter(
-            Q(item_id=item.item_id)
-            | (
-                Q(item_name__iexact=item.item_name)
-                & ~Q(item_id__in=catalog_ids)
-            )
-        ).aggregate(quantity=Sum("quantity"), bags=Sum("bags"))
+    """Return (grn_qty, grn_bags, dn_qty, dn_bags) for one catalog item.
+
+    Stock identity should follow business code first (internal_code), because item_id
+    may be generic or unstable across workflows.
+    """
+    code = (item.internal_code or "").strip()
+    if code:
+        grn_filter = Q(code__iexact=code)
+        dn_filter = Q(code__iexact=code)
+    else:
+        # Legacy fallback for rows created before code-based identity.
+        grn_filter = Q(item_id=item.item_id) | (
+            Q(item_name__iexact=item.item_name) & ~Q(item_id__in=catalog_ids)
+        )
+        dn_filter = Q(catalog_item_id=item.item_id) | (
+            Q(catalog_item_id__isnull=True) & Q(item_name__iexact=item.item_name)
+        )
+
+    grn_totals = GrnItems.objects.filter(grn_filter).aggregate(
+        quantity=Sum("quantity"), bags=Sum("bags")
     )
-    dn_totals = (
-        DNItems.objects.filter(
-            Q(catalog_item_id=item.item_id)
-            | (
-                Q(catalog_item_id__isnull=True)
-                & Q(item_name__iexact=item.item_name)
-            )
-        ).aggregate(quantity=Sum("quantity"), bags=Sum("bags"))
+    dn_totals = DNItems.objects.filter(dn_filter).aggregate(
+        quantity=Sum("quantity"), bags=Sum("bags")
     )
 
     grn_qty = grn_totals["quantity"] or 0
@@ -457,6 +462,7 @@ def _validate_grn_items(items):
         catalog = _resolve_catalog_item(item)
         item_name = catalog.item_name
         internal_code = str(catalog.internal_code or "").strip()
+        code = str(getattr(item, "code", "") or "").strip() or internal_code
 
         unit_measurement = getattr(item, "unit_measurement", "") or ""
 
@@ -473,6 +479,7 @@ def _validate_grn_items(items):
                 "item_name": item_name,
                 "quantity": quantity,
                 "unit_measurement": unit_measurement,
+                "code": code,
                 "internal_code": internal_code,
                 "bags": bags_val,
                 "catalog_item_id": catalog.item_id,
@@ -500,6 +507,7 @@ def _validate_dn_items(items):
         catalog = _resolve_catalog_item(item)
         item_name = catalog.item_name
         internal_code = str(catalog.internal_code or "").strip()
+        code = str(getattr(item, "code", "") or "").strip() or internal_code
 
         unit_measurement = getattr(item, "unit_measurement", "") or ""
 
@@ -515,6 +523,7 @@ def _validate_dn_items(items):
                 "item_name": item_name,
                 "quantity": quantity,
                 "unit_measurement": unit_measurement,
+                "code": code,
                 "internal_code": internal_code,
                 "bags": bags_val,
                 "catalog_item_id": catalog.item_id,
@@ -583,6 +592,7 @@ def create_grn(request, payload: GrnCreateSchema):
                 item_name=item["item_name"],
                 quantity=item["quantity"],
                 unit_measurement=item["unit_measurement"],
+                code=item["code"],
                 internal_code=item["internal_code"],
                 bags=item["bags"],
             )
@@ -621,8 +631,12 @@ def list_GRN(request):
                     items=[
                         GrnItemSchema(
                             grn_no=item.grn_no,
+                            code=item.code or item.internal_code,
                             item_name=item.item_name,
-                            quantity=item.quantity
+                            quantity=item.quantity,
+                            unit_measurement=item.unit_measurement,
+                            internal_code=item.internal_code,
+                            bags=float(item.bags) if item.bags is not None else None,
                         )
                         for item in grn.items.all()
                     ]
@@ -690,6 +704,7 @@ def update_GRN(request, grn_no: str, payload: GrnUpdateSchema):
                 item_name=item["item_name"],
                 quantity=item["quantity"],
                 unit_measurement=item["unit_measurement"],
+                code=item["code"],
                 internal_code=item["internal_code"],
                 bags=item["bags"],
             )
@@ -715,7 +730,6 @@ def delete_GRN(request, grn_no: str):
 
 
 def _grn_to_detail(grn):
-    admin_view = _is_admin(request)
     return {
         "id": grn.id,
         "supplier_name": grn.supplier_name,
@@ -732,6 +746,7 @@ def _grn_to_detail(grn):
         "items": [
             {
                 "grn_no": item.grn_no,
+                "code": item.code or item.internal_code,
                 "item_name": item.item_name,
                 "quantity": item.quantity,
                 "unit_measurement": item.unit_measurement,
@@ -856,6 +871,7 @@ def create_dn(request, payload: DnCreateSchema):
             quantity=item["quantity"],
             unit_measurement=item["unit_measurement"],
             internal_code=item["internal_code"],
+            code=item["code"],
             bags=item["bags"],
         )
         created_items.append(new_item)
@@ -871,7 +887,13 @@ def create_dn(request, payload: DnCreateSchema):
         "plate_no": dn.plate_no,
         "sales_no": dn.sales_no,
         "items": [
-            {"item_name": i.item_name, "quantity": i.quantity}
+            {
+                "code": i.code or i.internal_code,
+                "item_name": i.item_name,
+                "quantity": i.quantity,
+                "unit_measurement": i.unit_measurement,
+                "internal_code": i.internal_code,
+            }
             for i in created_items
         ],
     }
@@ -999,6 +1021,7 @@ def update_DN(request, dn_no: str, payload: DnUpdateSchema):
                 item_name=item["item_name"],
                 quantity=item["quantity"],
                 unit_measurement=item["unit_measurement"],
+                code=item["code"],
                 internal_code=item["internal_code"],
                 bags=item["bags"],
             )
@@ -1041,9 +1064,11 @@ def _dn_to_detail(dn):
         "authorized_by": dn.authorized_by,
         "items": [
             {
+                "code": item.code or item.internal_code,
                 "item_name": item.item_name,
                 "quantity": item.quantity,
                 "unit_measurement": item.unit_measurement,
+                "internal_code": item.internal_code,
             }
             for item in dn.dn_items.all()
         ],
@@ -1064,8 +1089,11 @@ def list_DN(request):
                     sales_no=dn.sales_no,
                     items=[
                         DnItemSchema(
+                            code=item.code or item.internal_code,
                             item_name=item.item_name,
-                            quantity=item.quantity
+                            quantity=item.quantity,
+                            unit_measurement=item.unit_measurement,
+                            internal_code=item.internal_code,
                         )
                         for item in dn.dn_items.all()
                     ]
@@ -1138,27 +1166,46 @@ def delete_item(request, item_id: uuid.UUID):
 
 @router.get("/stock", response=list[StockSchema])
 def display_stock(request):
-    items = Items.objects.all()
-    catalog_ids = list(Items.objects.values_list("item_id", flat=True))
-    stock_list = []
+    # Stock is keyed by GRN/DN line code (business code), not catalog item_id.
+    stock_map: dict[str, dict] = {}
 
-    for item in items:
-        grn_qty, grn_bags, dn_qty, dn_bags = _stock_totals_for_catalog_row(
-            item, catalog_ids
+    for row in GrnItems.objects.all():
+        code = (row.code or row.internal_code or "").strip()
+        if not code:
+            continue
+        bucket = stock_map.setdefault(
+            code,
+            {
+                "item_id": row.item_id,
+                "item_name": row.item_name,
+                "code": code,
+                "internal_code": code,
+                "quantity": 0.0,
+                "package": 0.0,
+            },
         )
-        stock_quantity = grn_qty - dn_qty
-        stock_bags = grn_bags - dn_bags
+        bucket["quantity"] += float(row.quantity or 0)
+        bucket["package"] += float(row.bags or 0)
 
-        stock_list.append({
-            "item_id": item.item_id,
-            "item_name": item.item_name,
-            "quantity": stock_quantity,
-            "package": stock_bags,
-            "hscode": item.hscode,
-            "internal_code": item.internal_code,
-        })
+    for row in DNItems.objects.all():
+        code = (row.code or row.internal_code or "").strip()
+        if not code:
+            continue
+        bucket = stock_map.setdefault(
+            code,
+            {
+                "item_id": row.catalog_item_id or row.item_id,
+                "item_name": row.item_name,
+                "code": code,
+                "internal_code": code,
+                "quantity": 0.0,
+                "package": 0.0,
+            },
+        )
+        bucket["quantity"] -= float(row.quantity or 0)
+        bucket["package"] -= float(row.bags or 0)
 
-    return stock_list
+    return list(stock_map.values())
 
 
 @router.post("/orders", response=OrderDetailSchema)
