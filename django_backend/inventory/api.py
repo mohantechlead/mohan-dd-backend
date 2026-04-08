@@ -29,6 +29,7 @@ from .models import (
     OrderItem,
     Purchase,
     PurchaseItem,
+    GIT,
     ShippingInvoice,
     ShippingInvoiceItem,
 )
@@ -48,6 +49,9 @@ from .schemas import (
     ItemUpdateSchema,
     ItemSchema,
     StockSchema,
+    GitSchema,
+    GitCreateSchema,
+    GitUpdateSchema,
     OrderCreateSchema,
     OrderDetailSchema,
     OrderItemSchema,
@@ -462,7 +466,9 @@ def _validate_grn_items(items):
         catalog = _resolve_catalog_item(item)
         item_name = catalog.item_name
         internal_code = str(catalog.internal_code or "").strip()
-        code = str(getattr(item, "code", "") or "").strip() or internal_code
+        code = str(getattr(item, "code", "") or "").strip()
+        if not code:
+            raise ValueError(f"Code is required for item '{item_name}'.")
 
         unit_measurement = getattr(item, "unit_measurement", "") or ""
 
@@ -507,7 +513,9 @@ def _validate_dn_items(items):
         catalog = _resolve_catalog_item(item)
         item_name = catalog.item_name
         internal_code = str(catalog.internal_code or "").strip()
-        code = str(getattr(item, "code", "") or "").strip() or internal_code
+        code = str(getattr(item, "code", "") or "").strip()
+        if not code:
+            raise ValueError(f"Code is required for item '{item_name}'.")
 
         unit_measurement = getattr(item, "unit_measurement", "") or ""
 
@@ -531,6 +539,130 @@ def _validate_dn_items(items):
         )
 
     return validated
+
+
+def _git_key(item_name: str, code: str | None) -> str:
+    return f"{(item_name or '').strip().lower()}|{(code or '').strip().lower()}"
+
+
+def _grn_qty_map(grn: GRN) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+    for gi in grn.items.all():
+        key = _git_key(gi.item_name, gi.code)
+        if key not in out:
+            out[key] = {
+                "item_name": gi.item_name,
+                "code": gi.code,
+                "qty": 0.0,
+            }
+        out[key]["qty"] += float(gi.quantity or 0)
+    return out
+
+
+def _purchase_qty_map(purchase: Purchase) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for p in purchase.items.all():
+        key = _git_key(p.item_name, None)
+        out[key] = out.get(key, 0.0) + float(p.quantity or 0)
+    return out
+
+
+def _upsert_git_running_variance(
+    *,
+    grn: GRN,
+    purchase: Purchase,
+    item_name: str,
+    code: str | None,
+    delta_received_qty: float,
+):
+    if abs(delta_received_qty) < 1e-9:
+        return
+
+    code_value = (code or "").strip() or None
+    purchase_key = _git_key(item_name, None)
+    purchase_qty = float(_purchase_qty_map(purchase).get(purchase_key, 0.0))
+
+    rows = list(
+        GIT.objects.filter(
+            purchase_no=grn.purchase_no,
+            item_name__iexact=(item_name or "").strip(),
+            code=code_value,
+        ).order_by("created_at")
+    )
+    row = rows[0] if rows else None
+
+    if row is None:
+        received_qty = delta_received_qty
+        variance = received_qty - purchase_qty
+        if abs(variance) < 1e-9:
+            return
+        GIT.objects.create(
+            grn=grn,
+            purchase_no=grn.purchase_no,
+            item_name=item_name,
+            code=code_value,
+            purchase_quantity=purchase_qty,
+            received_quantity=received_qty,
+            variance_quantity=abs(variance),
+            variance_type="increased" if variance > 0 else "decreased",
+        )
+        return
+
+    # Merge duplicates into one running row if any already exist.
+    if len(rows) > 1:
+        for extra in rows[1:]:
+            row.received_quantity = float(row.received_quantity or 0) + float(extra.received_quantity or 0)
+            extra.delete()
+
+    row.grn = grn
+    row.purchase_no = grn.purchase_no
+    row.item_name = item_name
+    row.code = code_value
+    row.purchase_quantity = purchase_qty
+    row.received_quantity = float(row.received_quantity or 0) + delta_received_qty
+    variance = float(row.received_quantity or 0) - float(row.purchase_quantity or 0)
+    row.variance_quantity = abs(variance)
+    row.variance_type = "increased" if variance >= 0 else "decreased"
+    row.save()
+
+
+def _sync_git_rows_for_grn(grn: GRN, previous_qty_by_key: dict[str, float] | None = None):
+    """Maintain running GIT variance per purchase/item/code (no duplicate rows)."""
+    purchase_no = (grn.purchase_no or "").strip()
+    if not purchase_no:
+        return
+    purchase = Purchase.objects.filter(purchase_number__iexact=purchase_no).first()
+    if not purchase:
+        return
+
+    previous_qty_by_key = previous_qty_by_key or {}
+    current_map = _grn_qty_map(grn)
+    current_qty_by_key = {k: float(v["qty"]) for k, v in current_map.items()}
+
+    all_keys = set(previous_qty_by_key.keys()) | set(current_qty_by_key.keys())
+    for key in all_keys:
+        prev_qty = float(previous_qty_by_key.get(key, 0.0))
+        now_qty = float(current_qty_by_key.get(key, 0.0))
+        delta = now_qty - prev_qty
+        if abs(delta) < 1e-9:
+            continue
+
+        if key in current_map:
+            item_name = current_map[key]["item_name"]
+            code = current_map[key]["code"]
+        else:
+            # Removed on GRN update: recover item_name/code from composite key.
+            name_part, code_part = key.split("|", 1)
+            item_name = name_part
+            code = code_part or None
+
+        _upsert_git_running_variance(
+            grn=grn,
+            purchase=purchase,
+            item_name=item_name,
+            code=code,
+            delta_received_qty=delta,
+        )
 
 
 @router.post("/grn", response=GrnDetailSchema)
@@ -598,6 +730,7 @@ def create_grn(request, payload: GrnCreateSchema):
             )
             created_items.append(new_item)
 
+        _sync_git_rows_for_grn(grn)
         _check_and_notify_negative_stock()
 
         grn.refresh_from_db()
@@ -631,7 +764,7 @@ def list_GRN(request):
                     items=[
                         GrnItemSchema(
                             grn_no=item.grn_no,
-                            code=item.code or item.internal_code,
+                            code=item.code,
                             item_name=item.item_name,
                             quantity=item.quantity,
                             unit_measurement=item.unit_measurement,
@@ -687,6 +820,9 @@ def update_GRN(request, grn_no: str, payload: GrnUpdateSchema):
         grn.ECD_no = payload.ECD_no
     if payload.transporter_name is not None:
         grn.transporter_name = payload.transporter_name
+    previous_qty_by_key = (
+        {k: float(v["qty"]) for k, v in _grn_qty_map(grn).items()} if payload.items is not None else None
+    )
     if payload.items is not None:
         try:
             validated_items = _validate_grn_items(payload.items)
@@ -713,6 +849,7 @@ def update_GRN(request, grn_no: str, payload: GrnUpdateSchema):
         grn.total_quantity = computed_total_quantity
     grn.save()
     grn.refresh_from_db()
+    _sync_git_rows_for_grn(grn, previous_qty_by_key)
     if payload.items is not None:
         _check_and_notify_negative_stock()
     return _grn_to_detail(grn)
@@ -746,7 +883,7 @@ def _grn_to_detail(grn):
         "items": [
             {
                 "grn_no": item.grn_no,
-                "code": item.code or item.internal_code,
+                "code": item.code,
                 "item_name": item.item_name,
                 "quantity": item.quantity,
                 "unit_measurement": item.unit_measurement,
@@ -888,7 +1025,7 @@ def create_dn(request, payload: DnCreateSchema):
         "sales_no": dn.sales_no,
         "items": [
             {
-                "code": i.code or i.internal_code,
+                "code": i.code,
                 "item_name": i.item_name,
                 "quantity": i.quantity,
                 "unit_measurement": i.unit_measurement,
@@ -1064,7 +1201,7 @@ def _dn_to_detail(dn):
         "authorized_by": dn.authorized_by,
         "items": [
             {
-                "code": item.code or item.internal_code,
+                "code": item.code,
                 "item_name": item.item_name,
                 "quantity": item.quantity,
                 "unit_measurement": item.unit_measurement,
@@ -1089,7 +1226,7 @@ def list_DN(request):
                     sales_no=dn.sales_no,
                     items=[
                         DnItemSchema(
-                            code=item.code or item.internal_code,
+                            code=item.code,
                             item_name=item.item_name,
                             quantity=item.quantity,
                             unit_measurement=item.unit_measurement,
@@ -1206,6 +1343,102 @@ def display_stock(request):
         bucket["package"] -= float(row.bags or 0)
 
     return list(stock_map.values())
+
+
+def _git_to_schema(row: GIT) -> GitSchema:
+    return GitSchema(
+        id=row.id,
+        grn_no=str(row.grn.grn_no),
+        purchase_no=row.purchase_no,
+        item_name=row.item_name,
+        code=row.code,
+        purchase_quantity=float(row.purchase_quantity or 0),
+        received_quantity=float(row.received_quantity or 0),
+        variance_quantity=float(row.variance_quantity or 0),
+        variance_type=row.variance_type,
+    )
+
+
+@router.get("/git", response=List[GitSchema])
+def list_git_rows(request):
+    rows = GIT.objects.select_related("grn").all().order_by("-updated_at")
+    return [_git_to_schema(r) for r in rows]
+
+
+@router.get("/git/{git_id}", response=GitSchema)
+def get_git_row(request, git_id: uuid.UUID):
+    row = get_object_or_404(GIT.objects.select_related("grn"), id=git_id)
+    return _git_to_schema(row)
+
+
+@router.post("/git", response=GitSchema)
+def create_git_row(request, payload: GitCreateSchema):
+    grn = get_object_or_404(GRN, grn_no=int(payload.grn_no) if str(payload.grn_no).isdigit() else payload.grn_no)
+    variance_type = (payload.variance_type or "").strip().lower()
+    if variance_type not in ("increased", "decreased"):
+        return JsonResponse({"detail": "variance_type must be increased or decreased."}, status=400)
+    row = GIT.objects.create(
+        grn=grn,
+        purchase_no=payload.purchase_no,
+        item_name=payload.item_name,
+        code=payload.code,
+        purchase_quantity=payload.purchase_quantity,
+        received_quantity=payload.received_quantity,
+        variance_quantity=payload.variance_quantity,
+        variance_type=variance_type,
+    )
+    return _git_to_schema(row)
+
+
+@router.put("/git/{git_id}", response=GitSchema, auth=JWTAuth())
+def update_git_row(request, git_id: uuid.UUID, payload: GitUpdateSchema):
+    err = _require_admin(request)
+    if err:
+        return err
+    row = get_object_or_404(GIT.objects.select_related("grn"), id=git_id)
+    if payload.purchase_no is not None:
+        row.purchase_no = payload.purchase_no
+    if payload.item_name is not None:
+        row.item_name = payload.item_name
+    if payload.code is not None:
+        row.code = payload.code
+    if payload.purchase_quantity is not None:
+        row.purchase_quantity = payload.purchase_quantity
+    if payload.received_quantity is not None:
+        row.received_quantity = payload.received_quantity
+    if payload.variance_quantity is not None:
+        row.variance_quantity = payload.variance_quantity
+    if payload.variance_type is not None:
+        vt = payload.variance_type.strip().lower()
+        if vt not in ("increased", "decreased"):
+            return JsonResponse({"detail": "variance_type must be increased or decreased."}, status=400)
+        row.variance_type = vt
+    row.save()
+    row.refresh_from_db()
+    return _git_to_schema(row)
+
+
+@router.delete("/git/{git_id}", auth=JWTAuth())
+def delete_git_row(request, git_id: uuid.UUID):
+    err = _require_admin(request)
+    if err:
+        return err
+    row = get_object_or_404(GIT, id=git_id)
+    row.delete()
+    return {"detail": "GIT row deleted successfully."}
+
+
+@router.post("/git/{git_id}/wipe-off", response=GitSchema, auth=JWTAuth())
+def wipe_off_git_row(request, git_id: uuid.UUID):
+    err = _require_admin(request)
+    if err:
+        return err
+    row = get_object_or_404(GIT.objects.select_related("grn"), id=git_id)
+    row.variance_quantity = 0
+    row.received_quantity = row.purchase_quantity
+    row.save()
+    row.refresh_from_db()
+    return _git_to_schema(row)
 
 
 @router.post("/orders", response=OrderDetailSchema)

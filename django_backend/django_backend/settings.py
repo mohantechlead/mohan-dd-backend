@@ -203,9 +203,8 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # Email
 # ==============================
 
-EMAIL_BACKEND = os.environ.get(
-    "EMAIL_BACKEND", "django.core.mail.backends.smtp.EmailBackend"
-)
+# TEMP: disable all outgoing emails (no-op backend).
+EMAIL_BACKEND = "django.core.mail.backends.dummy.EmailBackend"
 EMAIL_HOST = os.environ.get("EMAIL_HOST", "smtp.gmail.com")
 EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "tech@mohanplc.com")
 EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "llcbqsjcpgyzbqvc")
@@ -219,7 +218,7 @@ OVER_UNDER_DELIVERY_RECIPIENTS = [
     r.strip()
     for r in os.environ.get(
         "OVER_UNDER_DELIVERY_RECIPIENTS",
-        "sol@mohanplc.com,Kapil@mohanint.com,Harsh@mohanplc.com,Mayuraddis@gmail.com,Amritakaur2612@gmail.com",
+        "mekdi1610@gmail.com",
     ).split(",")
     if r.strip()
 ]

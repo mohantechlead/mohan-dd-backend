@@ -77,6 +77,23 @@ class DNItems(models.Model):
     def __str__(self):
         return f"{self.dn} - {self.item_name} "
 
+
+class GIT(models.Model):
+    id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True, primary_key=True)
+    grn = models.ForeignKey(GRN, on_delete=models.CASCADE, related_name="git_rows")
+    purchase_no = models.CharField(max_length=255, db_index=True)
+    item_name = models.CharField(max_length=255)
+    code = models.CharField(max_length=100, blank=True, null=True, db_index=True)
+    purchase_quantity = models.FloatField(default=0)
+    received_quantity = models.FloatField(default=0)
+    variance_quantity = models.FloatField(default=0)
+    variance_type = models.CharField(max_length=20)  # increased | decreased
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.purchase_no} - {self.item_name} ({self.variance_type})"
+
 class Items(models.Model):
     item_id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True)
     item_name = models.CharField(max_length=255)

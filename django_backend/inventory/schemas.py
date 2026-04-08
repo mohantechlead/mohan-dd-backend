@@ -194,6 +194,35 @@ class StockSchema(Schema):
     package: Optional[float]
 
 
+class GitBaseSchema(Schema):
+    purchase_no: str
+    item_name: str
+    code: Optional[str] = None
+    purchase_quantity: float
+    received_quantity: float
+    variance_quantity: float
+    variance_type: str
+
+
+class GitCreateSchema(GitBaseSchema):
+    grn_no: str
+
+
+class GitUpdateSchema(Schema):
+    purchase_no: Optional[str] = None
+    item_name: Optional[str] = None
+    code: Optional[str] = None
+    purchase_quantity: Optional[float] = None
+    received_quantity: Optional[float] = None
+    variance_quantity: Optional[float] = None
+    variance_type: Optional[str] = None
+
+
+class GitSchema(GitBaseSchema):
+    id: uuid.UUID
+    grn_no: str
+
+
 class OrderItemCreateSchema(Schema):
     item_name: str
     hs_code: str
