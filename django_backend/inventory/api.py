@@ -1032,6 +1032,7 @@ def create_dn(request, payload: DnCreateSchema):
                 "quantity": i.quantity,
                 "unit_measurement": i.unit_measurement,
                 "internal_code": i.internal_code,
+                "bags": float(i.bags) if i.bags is not None else None,
             }
             for i in created_items
         ],
@@ -1210,6 +1211,7 @@ def _dn_to_detail(dn):
                 "quantity": item.quantity,
                 "unit_measurement": item.unit_measurement,
                 "internal_code": item.internal_code,
+                "bags": float(item.bags) if item.bags is not None else None,
             }
             for item in dn.dn_items.all()
         ],
@@ -1235,6 +1237,7 @@ def list_DN(request):
                             quantity=item.quantity,
                             unit_measurement=item.unit_measurement,
                             internal_code=item.internal_code,
+                            bags=float(item.bags) if item.bags is not None else None,
                         )
                         for item in dn.dn_items.all()
                     ]

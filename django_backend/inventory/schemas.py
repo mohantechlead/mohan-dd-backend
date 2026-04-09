@@ -1,7 +1,10 @@
 from ninja import Schema
 from typing import List, Optional
 import uuid
-from datetime import date
+from datetime import date as datetime_date
+
+# Keep legacy `date` name for existing schema annotations in this file.
+date = datetime_date
 
 # Item schema sent from React
 class GrnItemCreateSchema(Schema):
@@ -10,8 +13,8 @@ class GrnItemCreateSchema(Schema):
     item_name: str
     quantity: int
     unit_measurement: str
-    bags: str
-    internal_code: str
+    bags: Optional[float] = None
+    internal_code: Optional[str] = None
    
 
 # Main GRN creation schema
@@ -29,7 +32,7 @@ class GrnCreateSchema(Schema):
     store_name: str = ""
     store_keeper: str = ""
 
-    date: date
+    date: datetime_date
     ECD_no: str = ""
     transporter_name: str = ""
     items: List[GrnItemCreateSchema]
@@ -66,7 +69,7 @@ class GrnDetailSchema(Schema):
 
 class GrnUpdateSchema(Schema):
     supplier_name: str | None = None
-    date: Optional[date] = None
+    date: Optional[datetime_date] = None
 
     received_from: str | None = None
     truck_no: str | None = None
@@ -103,8 +106,8 @@ class DnItemCreateSchema(Schema):
     item_name: str
     quantity: int
     unit_measurement: str
-    internal_code: str
-    bags: float
+    internal_code: Optional[str] = None
+    bags: Optional[float] = None
 
 # Main DN creation schema
 class DnCreateSchema(Schema):
@@ -112,7 +115,7 @@ class DnCreateSchema(Schema):
     dn_no: str
     plate_no: str
     sales_no: str
-    date: date
+    date: datetime_date
     ECD_no: str
     invoice_no: str
     gatepass_no: str
@@ -128,6 +131,7 @@ class DnItemSchema(Schema):
     quantity: int
     unit_measurement: Optional[str] = None
     internal_code: Optional[str] = None
+    bags: Optional[float] = None
 
 
 class OverUnderItemSchema(Schema):
@@ -157,7 +161,7 @@ class DnDetailSchema(Schema):
 
 class DnUpdateSchema(Schema):
     customer_name: str | None = None
-    date: Optional[date] = None
+    date: Optional[datetime_date] = None
     plate_no: str | None = None
     sales_no: str | None = None
     ECD_no: str | None = None
