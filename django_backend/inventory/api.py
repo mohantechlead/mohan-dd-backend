@@ -798,6 +798,8 @@ def update_GRN(request, grn_no: str, payload: GrnUpdateSchema):
     grn = get_object_or_404(GRN, grn_no=int(grn_no) if grn_no.isdigit() else grn_no)
     if payload.supplier_name is not None:
         grn.supplier_name = payload.supplier_name
+    if payload.date is not None:
+        grn.date = payload.date
 
     if payload.received_from is not None:
         grn.received_from = payload.received_from
@@ -1127,6 +1129,8 @@ def update_DN(request, dn_no: str, payload: DnUpdateSchema):
 
     if payload.customer_name is not None:
         dn.customer_name = payload.customer_name
+    if payload.date is not None:
+        dn.date = payload.date
     if payload.plate_no is not None:
         dn.plate_no = payload.plate_no
     if payload.sales_no is not None:

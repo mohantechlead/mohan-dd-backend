@@ -66,6 +66,7 @@ class GrnDetailSchema(Schema):
 
 class GrnUpdateSchema(Schema):
     supplier_name: str | None = None
+    date: Optional[date] = None
 
     received_from: str | None = None
     truck_no: str | None = None
@@ -156,6 +157,7 @@ class DnDetailSchema(Schema):
 
 class DnUpdateSchema(Schema):
     customer_name: str | None = None
+    date: Optional[date] = None
     plate_no: str | None = None
     sales_no: str | None = None
     ECD_no: str | None = None

@@ -17,7 +17,7 @@ class GRN(models.Model):
     total_quantity = models.IntegerField(default=0)
     store_name = models.CharField(max_length=255, blank=True, null=True)
     store_keeper = models.CharField(max_length=255, blank=True, null=True)
-    date = models.DateField(null=False, blank=False, auto_now = True)
+    date = models.DateField(null=False, blank=False)
     ECD_no = models.CharField(max_length=255, blank=True, null=True)
     transporter_name = models.CharField(max_length=255, blank=True, null=True)
 
@@ -50,7 +50,7 @@ class DN(models.Model):
     dn_no = models.CharField(max_length=255, unique=True)
     plate_no = models.CharField(max_length=255)
     sales_no = models.CharField(max_length=255)
-    date = models.DateField(null=False, blank=False, auto_now=True)
+    date = models.DateField(null=False, blank=False)
     ECD_no = models.CharField(max_length=255, blank=True, null=True)
     invoice_no = models.CharField(max_length=255, blank=True, null=True)
     gatepass_no = models.CharField(max_length=255, blank=True, null=True)
