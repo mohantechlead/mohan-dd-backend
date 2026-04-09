@@ -1302,11 +1302,27 @@ def delete_item(request, item_id: uuid.UUID):
 
 
 @router.get("/stock", response=list[StockSchema])
-def display_stock(request):
+def display_stock(
+    request,
+    as_of_date: Optional[str] = None,
+    code: Optional[str] = None,
+    item: Optional[str] = None,
+    min_quantity: Optional[float] = None,
+    grn_no: Optional[str] = None,
+    dn_no: Optional[str] = None,
+):
     # Stock is keyed by GRN/DN line code (business code), not catalog item_id.
     stock_map: dict[str, dict] = {}
 
-    for row in GrnItems.objects.all():
+    grn_qs = GrnItems.objects.select_related("grn").all()
+    dn_qs = DNItems.objects.select_related("dn").all()
+
+    if as_of_date:
+        # Date format expected: YYYY-MM-DD
+        grn_qs = grn_qs.filter(grn__date__lte=as_of_date)
+        dn_qs = dn_qs.filter(dn__date__lte=as_of_date)
+
+    for row in grn_qs:
         code = (row.code or row.internal_code or "").strip()
         if not code:
             continue
@@ -1319,12 +1335,16 @@ def display_stock(request):
                 "internal_code": code,
                 "quantity": 0.0,
                 "package": 0.0,
+                "grn_nos": set(),
+                "dn_nos": set(),
             },
         )
         bucket["quantity"] += float(row.quantity or 0)
         bucket["package"] += float(row.bags or 0)
+        if row.grn_id:
+            bucket["grn_nos"].add(str(row.grn.grn_no))
 
-    for row in DNItems.objects.all():
+    for row in dn_qs:
         code = (row.code or row.internal_code or "").strip()
         if not code:
             continue
@@ -1337,12 +1357,48 @@ def display_stock(request):
                 "internal_code": code,
                 "quantity": 0.0,
                 "package": 0.0,
+                "grn_nos": set(),
+                "dn_nos": set(),
             },
         )
         bucket["quantity"] -= float(row.quantity or 0)
         bucket["package"] -= float(row.bags or 0)
+        if row.dn_id:
+            bucket["dn_nos"].add(str(row.dn.dn_no))
 
-    return list(stock_map.values())
+    rows = list(stock_map.values())
+    for r in rows:
+        r["grn_nos"] = sorted(list(r.get("grn_nos", set())))
+        r["dn_nos"] = sorted(list(r.get("dn_nos", set())))
+
+    if code:
+        code_q = code.strip().lower()
+        rows = [r for r in rows if code_q in str(r.get("code", "")).lower()]
+
+    if item:
+        item_q = item.strip().lower()
+        rows = [r for r in rows if item_q in str(r.get("item_name", "")).lower()]
+
+    if min_quantity is not None:
+        rows = [r for r in rows if float(r.get("quantity") or 0) >= float(min_quantity)]
+
+    if grn_no:
+        grn_q = grn_no.strip().lower()
+        rows = [
+            r
+            for r in rows
+            if any(grn_q in str(no).lower() for no in (r.get("grn_nos") or []))
+        ]
+
+    if dn_no:
+        dn_q = dn_no.strip().lower()
+        rows = [
+            r
+            for r in rows
+            if any(dn_q in str(no).lower() for no in (r.get("dn_nos") or []))
+        ]
+
+    return rows
 
 
 def _git_to_schema(row: GIT) -> GitSchema:

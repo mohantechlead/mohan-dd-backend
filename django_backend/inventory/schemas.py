@@ -192,6 +192,8 @@ class StockSchema(Schema):
     internal_code: Optional[str]
     quantity: Optional[float]
     package: Optional[float]
+    grn_nos: Optional[List[str]] = None
+    dn_nos: Optional[List[str]] = None
 
 
 class GitBaseSchema(Schema):
