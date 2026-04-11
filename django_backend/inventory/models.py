@@ -14,12 +14,13 @@ class GRN(models.Model):
     purchase_no = models.CharField(max_length=255)
 
     received_from = models.CharField(max_length=255, blank=True, null=True)
-    total_quantity = models.IntegerField(default=0)
+    total_quantity = models.FloatField(default=0)
     store_name = models.CharField(max_length=255, blank=True, null=True)
     store_keeper = models.CharField(max_length=255, blank=True, null=True)
     date = models.DateField(null=False, blank=False)
     ECD_no = models.CharField(max_length=255, blank=True, null=True)
     transporter_name = models.CharField(max_length=255, blank=True, null=True)
+    remark = models.TextField(blank=True, null=True)
 
     def __str__(self):
         return f"{self.grn_no} ({self.supplier_name})"
@@ -33,7 +34,7 @@ class GrnItems(models.Model):
     grn_no = models.IntegerField(blank=True, null=True, db_index=True)
     item_name = models.CharField(max_length=255)
     code = models.CharField(max_length=100, blank=True, null=True, db_index=True)
-    quantity = models.IntegerField()
+    quantity = models.FloatField()
     unit_measurement = models.CharField(max_length=100)
     internal_code = models.CharField(max_length=100, blank=True, null=True)
     bags = models.FloatField(blank=True, null=True)
@@ -58,6 +59,7 @@ class DN(models.Model):
     receiver_name = models.CharField(max_length=255, blank=True, null=True)
     receiver_phone = models.CharField(max_length=20, blank=True, null=True)
     authorized_by = models.CharField(max_length=255, blank=True, null=True)
+    remark = models.TextField(blank=True, null=True)
 
     def __str__(self):
         return f"{self.dn_no} ({self.customer_name})"
@@ -69,7 +71,7 @@ class DNItems(models.Model):
     dn = models.ForeignKey(DN, on_delete=models.CASCADE, related_name='dn_items')
     item_name = models.CharField(max_length=255)
     code = models.CharField(max_length=100, blank=True, null=True, db_index=True)
-    quantity = models.IntegerField()
+    quantity = models.FloatField()
     unit_measurement = models.CharField(max_length=100)
     internal_code = models.CharField(max_length=100, blank=True, null=True)
     bags = models.FloatField(blank=True, null=True)

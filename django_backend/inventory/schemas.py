@@ -11,7 +11,7 @@ class GrnItemCreateSchema(Schema):
     item_id: Optional[uuid.UUID] = None
     code: Optional[str] = None
     item_name: str
-    quantity: int
+    quantity: float
     unit_measurement: str
     bags: Optional[float] = None
     internal_code: Optional[str] = None
@@ -28,13 +28,14 @@ class GrnCreateSchema(Schema):
     # Either purchase_id or purchase_no can be provided; purchase_id is linked to Purchase -> purchase_number
     purchase_no: str | None = None
 
-    total_quantity: int | None = None
+    total_quantity: float | None = None
     store_name: str = ""
     store_keeper: str = ""
 
     date: datetime_date
     ECD_no: str = ""
     transporter_name: str = ""
+    remark: Optional[str] = None
     items: List[GrnItemCreateSchema]
 
 # Response schema
@@ -42,7 +43,7 @@ class GrnItemSchema(Schema):
     grn_no: int | None = None
     code: Optional[str] = None
     item_name: str
-    quantity: int
+    quantity: float
     unit_measurement: Optional[str] = None
     internal_code: Optional[str] = None
     bags: Optional[float] = None
@@ -55,7 +56,7 @@ class GrnDetailSchema(Schema):
 
     received_from: str | None = None
     truck_no: str | None = None
-    total_quantity: int | None = None
+    total_quantity: float | None = None
     store_name: str | None = None
     store_keeper: str | None = None
 
@@ -64,6 +65,7 @@ class GrnDetailSchema(Schema):
     date: Optional[str] = None
     ECD_no: Optional[str] = None
     transporter_name: Optional[str] = None
+    remark: Optional[str] = None
     items: List[GrnItemSchema]
 
 
@@ -76,12 +78,13 @@ class GrnUpdateSchema(Schema):
 
     purchase_no: str | None = None
 
-    total_quantity: int | None = None
+    total_quantity: float | None = None
     store_name: str | None = None
     store_keeper: str | None = None
 
     ECD_no: str | None = None
     transporter_name: str | None = None
+    remark: str | None = None
     items: List[GrnItemCreateSchema] | None = None
 
 
@@ -91,12 +94,13 @@ class GRNListSchema(Schema):
 
     received_from: str | None = None
     truck_no: str | None = None
-    total_quantity: int | None = None
+    total_quantity: float | None = None
     store_name: str | None = None
     store_keeper: str | None = None
 
     purchase_no: str | None = None
 
+    remark: str | None = None
     items: List[GrnItemSchema]
 
 # DN Schemas
@@ -104,7 +108,7 @@ class DnItemCreateSchema(Schema):
     item_id: Optional[uuid.UUID] = None
     code: Optional[str] = None
     item_name: str
-    quantity: int
+    quantity: float
     unit_measurement: str
     internal_code: Optional[str] = None
     bags: Optional[float] = None
@@ -122,13 +126,14 @@ class DnCreateSchema(Schema):
     despathcher_name: str
     receiver_name: str
     authorized_by: str
+    remark: Optional[str] = None
     items: List[DnItemCreateSchema]
 
 # Response schema
 class DnItemSchema(Schema):
     code: Optional[str] = None
     item_name: str
-    quantity: int
+    quantity: float
     unit_measurement: Optional[str] = None
     internal_code: Optional[str] = None
     bags: Optional[float] = None
@@ -136,9 +141,9 @@ class DnItemSchema(Schema):
 
 class OverUnderItemSchema(Schema):
     item_name: str
-    invoiced: int
-    delivered: int
-    variance: int
+    invoiced: float
+    delivered: float
+    variance: float
 
 
 class DnDetailSchema(Schema):
@@ -154,6 +159,7 @@ class DnDetailSchema(Schema):
     despathcher_name: Optional[str] = None
     receiver_name: Optional[str] = None
     authorized_by: Optional[str] = None
+    remark: Optional[str] = None
     items: Optional[List[DnItemSchema]] = []
     over_items: Optional[List[OverUnderItemSchema]] = None
     under_items: Optional[List[OverUnderItemSchema]] = None
@@ -170,6 +176,7 @@ class DnUpdateSchema(Schema):
     despathcher_name: str | None = None
     receiver_name: str | None = None
     authorized_by: str | None = None
+    remark: str | None = None
     items: List[DnItemCreateSchema] | None = None
 
 

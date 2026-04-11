@@ -1,5 +1,6 @@
 import html
 import logging
+import math
 import re
 from decimal import Decimal
 from ninja import Router
@@ -243,7 +244,7 @@ def _resolve_catalog_item(row) -> Items:
     return catalog
 
 
-def _stock_totals_for_catalog_row(item: Items, catalog_ids: list) -> tuple[int, float, int, float]:
+def _stock_totals_for_catalog_row(item: Items, catalog_ids: list) -> tuple[float, float, float, float]:
     """Return (grn_qty, grn_bags, dn_qty, dn_bags) for one catalog item.
 
     Stock identity should follow business code first (internal_code), because item_id
@@ -269,9 +270,9 @@ def _stock_totals_for_catalog_row(item: Items, catalog_ids: list) -> tuple[int, 
         quantity=Sum("quantity"), bags=Sum("bags")
     )
 
-    grn_qty = grn_totals["quantity"] or 0
+    grn_qty = float(grn_totals["quantity"] or 0)
     grn_bags = float(grn_totals["bags"] or 0)
-    dn_qty = dn_totals["quantity"] or 0
+    dn_qty = float(dn_totals["quantity"] or 0)
     dn_bags = float(dn_totals["bags"] or 0)
     return grn_qty, grn_bags, dn_qty, dn_bags
 
@@ -367,13 +368,16 @@ def _get_over_under_delivery(dn):
         invoiced_by_item = {}
         for inv_item in invoice.items.all():
             name = inv_item.item_name
-            qty = int(inv_item.quantity)
+            qty = float(inv_item.quantity or 0)
             invoiced_by_item[name] = invoiced_by_item.get(name, 0) + qty
         for item_name, total_invoiced in invoiced_by_item.items():
-            total_delivered = DNItems.objects.filter(
-                dn__sales_no=dn.sales_no,
-                item_name=item_name,
-            ).aggregate(total=Sum("quantity"))["total"] or 0
+            total_delivered = float(
+                DNItems.objects.filter(
+                    dn__sales_no=dn.sales_no,
+                    item_name=item_name,
+                ).aggregate(total=Sum("quantity"))["total"]
+                or 0
+            )
             if total_delivered > total_invoiced:
                 over_items.append({
                     "item_name": item_name,
@@ -456,11 +460,11 @@ def _validate_grn_items(items):
     validated = []
     for item in items:
         try:
-            quantity = int(getattr(item, "quantity", 0) or 0)
+            quantity = float(getattr(item, "quantity", 0) or 0)
         except (TypeError, ValueError):
             raise ValueError("Invalid GRN item quantity.")
 
-        if quantity <= 0:
+        if not math.isfinite(quantity) or quantity <= 0:
             raise ValueError("Each GRN item quantity must be greater than 0.")
 
         catalog = _resolve_catalog_item(item)
@@ -503,11 +507,11 @@ def _validate_dn_items(items):
     validated = []
     for item in items:
         try:
-            quantity = int(getattr(item, "quantity", 0) or 0)
+            quantity = float(getattr(item, "quantity", 0) or 0)
         except (TypeError, ValueError):
             raise ValueError("Invalid DN item quantity.")
 
-        if quantity <= 0:
+        if not math.isfinite(quantity) or quantity <= 0:
             raise ValueError("Each DN item quantity must be greater than 0.")
 
         catalog = _resolve_catalog_item(item)
@@ -713,6 +717,7 @@ def create_grn(request, payload: GrnCreateSchema):
             date=payload.date,
             ECD_no=payload.ECD_no,
             transporter_name=payload.transporter_name,
+            remark=(payload.remark or "").strip() or None,
         )
 
         created_items = []
@@ -761,6 +766,7 @@ def list_GRN(request):
                     total_quantity=grn.total_quantity,
                     store_name=grn.store_name,
                     store_keeper=grn.store_keeper,
+                    remark=grn.remark,
                     items=[
                         GrnItemSchema(
                             grn_no=item.grn_no,
@@ -822,6 +828,8 @@ def update_GRN(request, grn_no: str, payload: GrnUpdateSchema):
         grn.ECD_no = payload.ECD_no
     if payload.transporter_name is not None:
         grn.transporter_name = payload.transporter_name
+    if payload.remark is not None:
+        grn.remark = (payload.remark or "").strip() or None
     previous_qty_by_key = (
         {k: float(v["qty"]) for k, v in _grn_qty_map(grn).items()} if payload.items is not None else None
     )
@@ -882,6 +890,7 @@ def _grn_to_detail(grn):
         "date": grn.date.isoformat() if grn.date else None,
         "ECD_no": grn.ECD_no,
         "transporter_name": grn.transporter_name,
+        "remark": grn.remark,
         "items": [
             {
                 "grn_no": item.grn_no,
@@ -997,6 +1006,7 @@ def create_dn(request, payload: DnCreateSchema):
         despathcher_name = payload.despathcher_name,
         receiver_name = payload.receiver_name,
         authorized_by = payload.authorized_by,
+        remark=(payload.remark or "").strip() or None,
     )
 
     # Create Items
@@ -1025,6 +1035,7 @@ def create_dn(request, payload: DnCreateSchema):
         "dn_no": dn.dn_no,
         "plate_no": dn.plate_no,
         "sales_no": dn.sales_no,
+        "remark": dn.remark,
         "items": [
             {
                 "code": i.code,
@@ -1148,6 +1159,8 @@ def update_DN(request, dn_no: str, payload: DnUpdateSchema):
         dn.receiver_name = payload.receiver_name
     if payload.authorized_by is not None:
         dn.authorized_by = payload.authorized_by
+    if payload.remark is not None:
+        dn.remark = (payload.remark or "").strip() or None
     if payload.items is not None:
         try:
             validated_items = _validate_dn_items(payload.items)
@@ -1204,6 +1217,7 @@ def _dn_to_detail(dn):
         "despathcher_name": dn.despathcher_name,
         "receiver_name": dn.receiver_name,
         "authorized_by": dn.authorized_by,
+        "remark": dn.remark,
         "items": [
             {
                 "code": item.code,
@@ -1230,6 +1244,7 @@ def list_DN(request):
                     customer_name=dn.customer_name,
                     dn_no=dn.dn_no,
                     sales_no=dn.sales_no,
+                    remark=dn.remark,
                     items=[
                         DnItemSchema(
                             code=item.code,
