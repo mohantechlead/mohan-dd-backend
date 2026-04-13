@@ -1345,16 +1345,16 @@ def display_stock(
         dn_qs = dn_qs.filter(dn__date__lte=as_of_date)
 
     for row in grn_qs:
-        code = (row.code or row.internal_code or "").strip()
-        if not code:
+        row_code = (row.code or row.internal_code or "").strip()
+        if not row_code:
             continue
         bucket = stock_map.setdefault(
-            code,
+            row_code,
             {
                 "item_id": row.item_id,
                 "item_name": row.item_name,
-                "code": code,
-                "internal_code": code,
+                "code": row_code,
+                "internal_code": row_code,
                 "quantity": 0.0,
                 "package": 0.0,
                 "grn_nos": set(),
@@ -1367,16 +1367,16 @@ def display_stock(
             bucket["grn_nos"].add(str(row.grn.grn_no))
 
     for row in dn_qs:
-        code = (row.code or row.internal_code or "").strip()
-        if not code:
+        row_code = (row.code or row.internal_code or "").strip()
+        if not row_code:
             continue
         bucket = stock_map.setdefault(
-            code,
+            row_code,
             {
                 "item_id": row.catalog_item_id or row.item_id,
                 "item_name": row.item_name,
-                "code": code,
-                "internal_code": code,
+                "code": row_code,
+                "internal_code": row_code,
                 "quantity": 0.0,
                 "package": 0.0,
                 "grn_nos": set(),
