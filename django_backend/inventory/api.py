@@ -86,10 +86,10 @@ _M_ORDER_NUMBER_RE = re.compile(r"^M\s*(\d+)$", re.IGNORECASE)
 _PURCHASE_NUMBER_RE = re.compile(r"^MPDDFZE(\d+)$", re.IGNORECASE)
 
 
-def _purchase_aggregate_from_line_items(items) -> tuple[Decimal, int, int]:
+def _purchase_aggregate_from_line_items(items) -> tuple[Decimal, float, float]:
     """before_vat = sum(total_price); total_quantity and remaining = sum(quantity) (same for now)."""
     before_vat = sum(Decimal(str(i.total_price)) for i in items)
-    qty_sum = sum(int(i.quantity) for i in items)
+    qty_sum = sum(float(i.quantity) for i in items)
     return before_vat, qty_sum, qty_sum
 
 

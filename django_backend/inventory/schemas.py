@@ -351,11 +351,11 @@ class PurchaseItemCreateSchema(Schema):
     item_id: uuid.UUID | None = None
     item_name: str
     price: float
-    quantity: int
+    quantity: float
     total_price: float
     measurement: str
     # If omitted, server sets remaining = quantity
-    remaining: Optional[int] = None
+    remaining: Optional[float] = None
     # Line before VAT; if omitted, server sets = total_price
     before_vat: Optional[float] = None
     hscode: Optional[str] = None
@@ -392,8 +392,8 @@ class PurchaseItemSchema(Schema):
     purchase_number: str
     item_name: str
     price: float
-    quantity: int
-    remaining: int
+    quantity: float
+    remaining: float
     total_price: float
     before_vat: float
     hscode: Optional[str] = None
@@ -435,8 +435,8 @@ class PurchaseDetailSchema(Schema):
     insurance: Optional[str] = None
     shipment_type: Optional[str] = None
     before_vat: float
-    total_quantity: int
-    remaining: int
+    total_quantity: float
+    remaining: float
     items: List[PurchaseItemSchema]
 
 

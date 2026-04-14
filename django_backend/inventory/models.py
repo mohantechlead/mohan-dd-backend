@@ -263,8 +263,8 @@ class Purchase(models.Model):
     shipment_type = models.CharField(max_length=50)
     # Sum of line total_price (same as order total before VAT); remaining mirrors total_quantity for now
     before_vat = models.DecimalField(max_digits=14, decimal_places=2, default=0)
-    total_quantity = models.IntegerField(default=0)
-    remaining = models.IntegerField(default=0)
+    total_quantity = models.FloatField(default=0)
+    remaining = models.FloatField(default=0)
     status = models.CharField(max_length=20, default="pending")
     approved_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -308,8 +308,8 @@ class PurchaseItem(models.Model):
     )
     item_name = models.CharField(max_length=255)
     price = models.DecimalField(max_digits=12, decimal_places=2)
-    quantity = models.IntegerField()
-    remaining = models.IntegerField(default=0)
+    quantity = models.FloatField()
+    remaining = models.FloatField(default=0)
     total_price = models.DecimalField(max_digits=12, decimal_places=2)
     # Line-level before VAT; kept equal to total_price for this workflow
     before_vat = models.DecimalField(max_digits=12, decimal_places=2, default=0)
