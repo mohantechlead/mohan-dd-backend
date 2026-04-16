@@ -196,6 +196,7 @@ class ShippingInvoice(models.Model):
     invoice_number = models.CharField(max_length=255, unique=True)
     invoice_date = models.DateField()
     waybill_number = models.CharField(max_length=255, blank=True, null=True)
+    ecd_no = models.CharField(max_length=255, blank=True, null=True)
     customer_order_number = models.CharField(max_length=255)
     container_number = models.CharField(max_length=255, blank=True, null=True)
     vessel = models.CharField(max_length=255, blank=True, null=True)

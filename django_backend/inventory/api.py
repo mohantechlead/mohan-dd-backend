@@ -2298,6 +2298,7 @@ def create_shipping_invoice(request, payload: ShippingInvoiceCreateSchema):
         invoice_number=payload.invoice_number,
         invoice_date=payload.invoice_date,
         waybill_number=payload.waybill_number,
+        ecd_no=payload.ecd_no,
         customer_order_number=payload.customer_order_number,
         container_number=payload.container_number,
         vessel=payload.vessel,
@@ -2380,6 +2381,7 @@ def get_shipping_invoice_detail(request, invoice_id: uuid.UUID):
         invoice_number=invoice.invoice_number,
         invoice_date=invoice.invoice_date,
         waybill_number=invoice.waybill_number,
+        ecd_no=invoice.ecd_no,
         customer_order_number=invoice.customer_order_number,
         container_number=invoice.container_number,
         vessel=invoice.vessel,
@@ -2428,6 +2430,7 @@ def update_shipping_invoice(
 
     invoice.invoice_date = payload.invoice_date
     invoice.waybill_number = payload.waybill_number
+    invoice.ecd_no = payload.ecd_no
     invoice.customer_order_number = payload.customer_order_number
     invoice.container_number = payload.container_number
     invoice.vessel = payload.vessel
@@ -2474,6 +2477,7 @@ def update_shipping_invoice(
         invoice_number=invoice.invoice_number,
         invoice_date=invoice.invoice_date,
         waybill_number=invoice.waybill_number,
+        ecd_no=invoice.ecd_no,
         customer_order_number=invoice.customer_order_number,
         container_number=invoice.container_number,
         vessel=invoice.vessel,
@@ -2660,6 +2664,7 @@ def authorize_shipping_invoice(request, invoice_id: uuid.UUID):
         invoice_number=invoice.invoice_number,
         invoice_date=invoice.invoice_date,
         waybill_number=invoice.waybill_number,
+        ecd_no=invoice.ecd_no,
         customer_order_number=invoice.customer_order_number,
         container_number=invoice.container_number,
         vessel=invoice.vessel,

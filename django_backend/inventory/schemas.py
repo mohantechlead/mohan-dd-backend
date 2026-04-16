@@ -495,6 +495,7 @@ class ShippingInvoiceCreateSchema(Schema):
     invoice_number: str
     invoice_date: date
     waybill_number: Optional[str]
+    ecd_no: Optional[str]
     customer_order_number: str
     container_number: Optional[str]
     vessel: Optional[str]
@@ -516,6 +517,7 @@ class ShippingInvoiceCreateSchema(Schema):
 class ShippingInvoiceUpdateSchema(Schema):
     invoice_date: date
     waybill_number: Optional[str]
+    ecd_no: Optional[str]
     customer_order_number: str
     container_number: Optional[str]
     vessel: Optional[str]
@@ -567,6 +569,7 @@ class ShippingInvoiceDetailSchema(Schema):
     invoice_number: str
     invoice_date: date
     waybill_number: Optional[str]
+    ecd_no: Optional[str]
     customer_order_number: str
     container_number: Optional[str]
     vessel: Optional[str]
