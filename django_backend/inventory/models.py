@@ -228,6 +228,8 @@ class ShippingInvoiceItem(models.Model):
     quantity = models.FloatField()
     total_price = models.DecimalField(max_digits=12, decimal_places=2)
     measurement = models.CharField(max_length=100)
+    package = models.FloatField(blank=True, null=True)
+    drums = models.FloatField(blank=True, null=True)
     bags = models.FloatField(blank=True, null=True)
     net_weight = models.FloatField(blank=True, null=True)
     gross_weight = models.FloatField(blank=True, null=True)

@@ -481,6 +481,8 @@ class ShippingInvoiceItemCreateSchema(Schema):
     quantity: float
     total_price: float
     measurement: str
+    package: Optional[float] = None
+    drums: Optional[float] = None
     bags: Optional[float]
     net_weight: Optional[float]
     gross_weight: Optional[float]
@@ -554,6 +556,8 @@ class ShippingInvoiceItemSchema(Schema):
     quantity: float
     total_price: float
     measurement: str
+    package: Optional[float] = None
+    drums: Optional[float] = None
     bags: Optional[float]
     net_weight: Optional[float]
     gross_weight: Optional[float]

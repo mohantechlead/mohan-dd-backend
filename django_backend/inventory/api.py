@@ -2317,6 +2317,13 @@ def create_shipping_invoice(request, payload: ShippingInvoiceCreateSchema):
     )
 
     for item in payload.items:
+        has_bags = item.bags is not None and str(item.bags).strip() != ""
+        has_drums = getattr(item, "drums", None) is not None and str(getattr(item, "drums", "")).strip() != ""
+        if has_bags and has_drums:
+            return JsonResponse(
+                {"detail": "Each item can have either bags or drums, not both."},
+                status=400,
+            )
         ShippingInvoiceItem.objects.create(
             id=uuid.uuid4(),
             invoice=invoice,
@@ -2326,6 +2333,8 @@ def create_shipping_invoice(request, payload: ShippingInvoiceCreateSchema):
             quantity=item.quantity,
             total_price=item.total_price,
             measurement=item.measurement,
+            package=getattr(item, "package", None),
+            drums=getattr(item, "drums", None),
             bags=item.bags,
             net_weight=item.net_weight,
             gross_weight=item.gross_weight,
@@ -2407,6 +2416,8 @@ def get_shipping_invoice_detail(request, invoice_id: uuid.UUID):
                 quantity=i.quantity,
                 total_price=float(i.total_price),
                 measurement=i.measurement,
+                package=i.package,
+                drums=i.drums,
                 bags=i.bags,
                 net_weight=i.net_weight,
                 gross_weight=i.gross_weight,
@@ -2451,6 +2462,13 @@ def update_shipping_invoice(
     # Replace items
     invoice.items.all().delete()
     for item in payload.items:
+        has_bags = item.bags is not None and str(item.bags).strip() != ""
+        has_drums = getattr(item, "drums", None) is not None and str(getattr(item, "drums", "")).strip() != ""
+        if has_bags and has_drums:
+            return JsonResponse(
+                {"detail": "Each item can have either bags or drums, not both."},
+                status=400,
+            )
         ShippingInvoiceItem.objects.create(
             id=uuid.uuid4(),
             invoice=invoice,
@@ -2460,6 +2478,8 @@ def update_shipping_invoice(
             quantity=item.quantity,
             total_price=item.total_price,
             measurement=item.measurement,
+            package=getattr(item, "package", None),
+            drums=getattr(item, "drums", None),
             bags=item.bags,
             net_weight=item.net_weight,
             gross_weight=item.gross_weight,
@@ -2503,6 +2523,8 @@ def update_shipping_invoice(
                 quantity=i.quantity,
                 total_price=float(i.total_price),
                 measurement=i.measurement,
+                package=i.package,
+                drums=i.drums,
                 bags=i.bags,
                 net_weight=i.net_weight,
                 gross_weight=i.gross_weight,
@@ -2690,6 +2712,8 @@ def authorize_shipping_invoice(request, invoice_id: uuid.UUID):
                 quantity=i.quantity,
                 total_price=float(i.total_price),
                 measurement=i.measurement,
+                package=i.package,
+                drums=i.drums,
                 bags=i.bags,
                 net_weight=i.net_weight,
                 gross_weight=i.gross_weight,
