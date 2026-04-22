@@ -325,7 +325,7 @@ def _check_and_notify_over_under_delivery(dn):
         message = "\n".join(lines)
         subject = "Over/Under Delivery Notification"
 
-        recipient_list = getattr(settings, "OVER_UNDER_DELIVERY_RECIPIENTS", [])
+        recipient_list = getattr(settings, "NOTIFICATION_EMAIL_RECIPIENTS", [])
 
         if recipient_list:
             sent = send_mail(
@@ -437,9 +437,7 @@ def _check_and_notify_negative_stock():
             subject="Negative Stock Alert",
             message=message,
             from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=[
-"mekdi1610@gmail.com"
-            ],
+            recipient_list=getattr(settings, "NOTIFICATION_EMAIL_RECIPIENTS", []),
             fail_silently=True,
         )
         if sent > 0:
@@ -2566,9 +2564,7 @@ def authorize_shipping_invoice(request, invoice_id: uuid.UUID):
             f"  - {i.item_name}: {i.quantity}"
             for i in invoice.items.all()
         )
-        recipient_list = [
-            "mekdi1610@gmail.com",
-        ]
+        recipient_list = getattr(settings, "NOTIFICATION_EMAIL_RECIPIENTS", [])
         frontend_base = getattr(settings, "FRONTEND_BASE_URL", "http://localhost:3000")
         view_url = f"{frontend_base.rstrip('/')}/diredawa/orders/{invoice.order.order_number}/loading-instruction?invoiceId={invoice.id}"
 

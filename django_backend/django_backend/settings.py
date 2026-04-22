@@ -203,8 +203,12 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # Email
 # ==============================
 
-# TEMP: disable all outgoing emails (no-op backend).
-EMAIL_BACKEND = "django.core.mail.backends.dummy.EmailBackend"
+# Default to real SMTP delivery. Override via env when needed, e.g.
+# EMAIL_BACKEND=django.core.mail.backends.dummy.EmailBackend
+EMAIL_BACKEND = os.environ.get(
+    "EMAIL_BACKEND",
+    "django.core.mail.backends.smtp.EmailBackend",
+)
 EMAIL_HOST = os.environ.get("EMAIL_HOST", "smtp.gmail.com")
 EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "tech@mohanplc.com")
 EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "llcbqsjcpgyzbqvc")
@@ -213,12 +217,27 @@ EMAIL_USE_TLS = True
 EMAIL_TIMEOUT = 30
 DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
 
-# Recipients for over/under delivery notifications (comma-separated emails)
+# Shared recipients for inventory notifications (comma-separated emails).
+# Uses NOTIFICATION_EMAIL_RECIPIENTS first, then falls back to legacy
+# OVER_UNDER_DELIVERY_RECIPIENTS for backward compatibility.
+NOTIFICATION_EMAIL_RECIPIENTS = [
+    r.strip()
+    for r in os.environ.get(
+        "NOTIFICATION_EMAIL_RECIPIENTS",
+        os.environ.get(
+            "OVER_UNDER_DELIVERY_RECIPIENTS",
+            "sol@mohanplc.com,Kapil@mohanint.com,Harsh@mohanplc.com,Mayuraddis@gmail.com,Amritakaur2612@gmail.com",
+        ),
+    ).split(",")
+    if r.strip()
+]
+
+# Backward-compatible alias for any existing references.
 OVER_UNDER_DELIVERY_RECIPIENTS = [
     r.strip()
     for r in os.environ.get(
         "OVER_UNDER_DELIVERY_RECIPIENTS",
-        "mekdi1610@gmail.com",
+        ",".join(NOTIFICATION_EMAIL_RECIPIENTS),
     ).split(",")
     if r.strip()
 ]
