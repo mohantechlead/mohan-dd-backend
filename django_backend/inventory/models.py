@@ -224,6 +224,8 @@ class ShippingInvoiceItem(models.Model):
     invoice = models.ForeignKey(ShippingInvoice, on_delete=models.CASCADE, related_name="items")
     item_id = models.UUIDField(blank=True, null=True, db_index=True)
     item_name = models.CharField(max_length=255)
+    code = models.CharField(max_length=100, blank=True, null=True, db_index=True)
+    notes = models.TextField(blank=True, null=True)
     price = models.DecimalField(max_digits=12, decimal_places=2)
     quantity = models.FloatField()
     total_price = models.DecimalField(max_digits=12, decimal_places=2)

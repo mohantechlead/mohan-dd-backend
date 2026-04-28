@@ -91,6 +91,7 @@ class GrnUpdateSchema(Schema):
 class GRNListSchema(Schema):
     supplier_name: str
     grn_no: int
+    date: Optional[str] = None
 
     received_from: str | None = None
     truck_no: str | None = None
@@ -477,6 +478,8 @@ class PurchaseUpdateSchema(Schema):
 class ShippingInvoiceItemCreateSchema(Schema):
     item_id: uuid.UUID | None = None
     item_name: str
+    code: Optional[str] = None
+    notes: Optional[str] = None
     price: float
     quantity: float
     total_price: float
@@ -552,6 +555,8 @@ class ShippingInvoiceSummarySchema(Schema):
 class ShippingInvoiceItemSchema(Schema):
     item_id: uuid.UUID | None = None
     item_name: str
+    code: Optional[str] = None
+    notes: Optional[str] = None
     price: float
     quantity: float
     total_price: float

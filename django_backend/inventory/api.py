@@ -758,6 +758,7 @@ def list_GRN(request):
                 GRNListSchema(
                     supplier_name=grn.supplier_name,
                     grn_no=grn.grn_no,
+                    date=grn.date.isoformat() if grn.date else None,
                     purchase_no=grn.purchase_no,
                     received_from=grn.received_from,
                     truck_no=grn.truck_no,
@@ -1571,6 +1572,8 @@ def create_order(request, payload: OrderCreateSchema):
         )
         created_items.append(new_item)
 
+    admin_view = _is_admin(request)
+
     return {
         "id": order.id,
         "order_number": order.order_number,
@@ -2327,6 +2330,8 @@ def create_shipping_invoice(request, payload: ShippingInvoiceCreateSchema):
             invoice=invoice,
             item_id=getattr(item, "item_id", None),
             item_name=item.item_name,
+            code=getattr(item, "code", None),
+            notes=getattr(item, "notes", None),
             price=item.price,
             quantity=item.quantity,
             total_price=item.total_price,
@@ -2410,6 +2415,8 @@ def get_shipping_invoice_detail(request, invoice_id: uuid.UUID):
             ShippingInvoiceItemSchema(
                 item_id=i.item_id,
                 item_name=i.item_name,
+                code=i.code,
+                notes=i.notes,
                 price=float(i.price),
                 quantity=i.quantity,
                 total_price=float(i.total_price),
@@ -2472,6 +2479,8 @@ def update_shipping_invoice(
             invoice=invoice,
             item_id=getattr(item, "item_id", None),
             item_name=item.item_name,
+            code=getattr(item, "code", None),
+            notes=getattr(item, "notes", None),
             price=item.price,
             quantity=item.quantity,
             total_price=item.total_price,
@@ -2517,6 +2526,8 @@ def update_shipping_invoice(
             ShippingInvoiceItemSchema(
                 item_id=i.item_id,
                 item_name=i.item_name,
+                code=i.code,
+                notes=i.notes,
                 price=float(i.price),
                 quantity=i.quantity,
                 total_price=float(i.total_price),
@@ -2704,6 +2715,8 @@ def authorize_shipping_invoice(request, invoice_id: uuid.UUID):
             ShippingInvoiceItemSchema(
                 item_id=i.item_id,
                 item_name=i.item_name,
+                code=i.code,
+                notes=i.notes,
                 price=float(i.price),
                 quantity=i.quantity,
                 total_price=float(i.total_price),

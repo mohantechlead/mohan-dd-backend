@@ -207,7 +207,7 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # EMAIL_BACKEND=django.core.mail.backends.dummy.EmailBackend
 EMAIL_BACKEND = os.environ.get(
     "EMAIL_BACKEND",
-    "django.core.mail.backends.smtp.EmailBackend",
+    "django.core.mail.backends.dummy.EmailBackend",
 )
 EMAIL_HOST = os.environ.get("EMAIL_HOST", "smtp.gmail.com")
 EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "tech@mohanplc.com")
