@@ -143,20 +143,6 @@ def _require_admin(request):
     return None
 
 
-def _require_admin_or_store(request):
-    """Return None if allowed, or JsonResponse with 403 if not admin/store."""
-    user = getattr(request, "user", None)
-    if not user or not user.is_authenticated:
-        return JsonResponse({"detail": "Authentication required."}, status=401)
-    role = str(getattr(user, "role", "logistics")).lower()
-    if role not in {"admin", "store"} and not getattr(user, "is_superuser", False):
-        return JsonResponse(
-            {"detail": "Admin or store role required to access this resource."},
-            status=403,
-        )
-    return None
-
-
 def _is_admin(request) -> bool:
     user = getattr(request, "user", None)
     if not user or not getattr(user, "is_authenticated", False):
@@ -811,7 +797,7 @@ def get_GRN(request, grn_no: str):
 
 @router.put("/grn/{grn_no}", response=GrnDetailSchema, auth=JWTAuth())
 def update_GRN(request, grn_no: str, payload: GrnUpdateSchema):
-    err = _require_admin_or_store(request)
+    err = _require_admin(request)
     if err:
         return err
     grn = get_object_or_404(GRN, grn_no=int(grn_no) if grn_no.isdigit() else grn_no)
@@ -1082,7 +1068,7 @@ def get_DN(request, dn_no: str):
 
 @router.put("/dn/{dn_no}", response=DnDetailSchema, auth=JWTAuth())
 def update_DN(request, dn_no: str, payload: DnUpdateSchema):
-    err = _require_admin_or_store(request)
+    err = _require_admin(request)
     if err:
         return err
     dn = get_object_or_404(DN, dn_no=dn_no)
