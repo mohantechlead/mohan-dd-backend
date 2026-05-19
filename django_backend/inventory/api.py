@@ -277,6 +277,82 @@ def _stock_totals_for_catalog_row(item: Items, catalog_ids: list) -> tuple[float
     return grn_qty, grn_bags, dn_qty, dn_bags
 
 
+def _build_stock_by_code(as_of_date=None):
+    """Aggregate stock per business code (same logic as GET /stock)."""
+    stock_map: dict[str, dict] = {}
+    grn_qs = GrnItems.objects.select_related("grn").all()
+    dn_qs = DNItems.objects.select_related("dn").all()
+
+    if as_of_date:
+        grn_qs = grn_qs.filter(grn__date__lte=as_of_date)
+        dn_qs = dn_qs.filter(dn__date__lte=as_of_date)
+
+    for row in grn_qs:
+        row_code = (row.code or row.internal_code or "").strip()
+        if not row_code:
+            continue
+        bucket = stock_map.setdefault(
+            row_code,
+            {
+                "item_id": row.item_id,
+                "item_name": row.item_name,
+                "code": row_code,
+                "internal_code": row_code,
+                "quantity": 0.0,
+                "package": 0.0,
+                "grn_nos": set(),
+                "dn_nos": set(),
+            },
+        )
+        bucket["quantity"] += float(row.quantity or 0)
+        bucket["package"] += float(row.bags or 0)
+        if row.grn_id:
+            bucket["grn_nos"].add(str(row.grn.grn_no))
+
+    for row in dn_qs:
+        row_code = (row.code or row.internal_code or "").strip()
+        if not row_code:
+            continue
+        bucket = stock_map.setdefault(
+            row_code,
+            {
+                "item_id": row.catalog_item_id or row.item_id,
+                "item_name": row.item_name,
+                "code": row_code,
+                "internal_code": row_code,
+                "quantity": 0.0,
+                "package": 0.0,
+                "grn_nos": set(),
+                "dn_nos": set(),
+            },
+        )
+        bucket["quantity"] -= float(row.quantity or 0)
+        bucket["package"] -= float(row.bags or 0)
+        if row.dn_id:
+            bucket["dn_nos"].add(str(row.dn.dn_no))
+
+    rows = list(stock_map.values())
+    for r in rows:
+        r["grn_nos"] = sorted(r.get("grn_nos", set()))
+        r["dn_nos"] = sorted(r.get("dn_nos", set()))
+    return rows
+
+
+def _resolve_dn_invoice_number(dn) -> str:
+    invoice_no = (dn.invoice_no or "").strip()
+    invoice_num = invoice_no or "N/A"
+    if invoice_no:
+        order = Order.objects.filter(order_number=dn.sales_no).first()
+        if order:
+            inv = ShippingInvoice.objects.filter(
+                order=order,
+                invoice_number__iexact=invoice_no,
+            ).first()
+            if inv:
+                invoice_num = inv.invoice_number
+    return invoice_num
+
+
 def _check_and_notify_over_under_delivery(dn):
     """
     Compare DN total delivered quantities vs Invoice. Send email if variances exist.
@@ -285,60 +361,147 @@ def _check_and_notify_over_under_delivery(dn):
     over_items, under_items = _get_over_under_delivery(dn)
     if not over_items and not under_items:
         return over_items, under_items
+
+    recipient_list = getattr(settings, "NOTIFICATION_EMAIL_RECIPIENTS", [])
+    if not recipient_list:
+        logger.warning("Over/under delivery notification skipped: no NOTIFICATION_EMAIL_RECIPIENTS")
+        return over_items, under_items
+
     try:
-        invoice_no = (dn.invoice_no or "").strip()
-        invoice_num = invoice_no or "N/A"
-        if invoice_no:
-            order = Order.objects.filter(order_number=dn.sales_no).first()
-            if order:
-                inv = ShippingInvoice.objects.filter(
-                    order=order,
-                    invoice_number__iexact=invoice_no,
-                ).first()
-                if inv:
-                    invoice_num = inv.invoice_number
-        lines = [
-            f"Delivery Note: {dn.dn_no}",
-            f"Order/Sales No: {dn.sales_no}",
-            f"Invoice: {invoice_num}",
-            f"Customer: {dn.customer_name}",
+        invoice_num = _resolve_dn_invoice_number(dn)
+        dn_date_str = dn.date.strftime("%Y-%m-%d") if dn.date else "—"
+        variance_count = len(over_items) + len(under_items)
+
+        def _esc(s):
+            return html.escape(str(s) if s is not None else "")
+
+        def _plain_variance_section(title, items, variance_label):
+            if not items:
+                return []
+            section = [title]
+            for it in items:
+                section.append(
+                    f"  - {it['item_name']}: invoiced={it['invoiced']}, "
+                    f"delivered={it['delivered']} ({variance_label} {it['variance']})"
+                )
+            section.append("")
+            return section
+
+        plain_lines = [
+            "OVER/UNDER DELIVERY NOTIFICATION",
+            "=" * 40,
+            "",
+            "Delivered quantities on this delivery note do not match the invoice.",
+            "",
+            "DELIVERY DETAILS",
+            f"  Delivery Note:        {dn.dn_no}",
+            f"  Order/Sales No:       {dn.sales_no}",
+            f"  Invoice:              {invoice_num}",
+            f"  Customer:             {dn.customer_name}",
+            f"  DN Date:              {dn_date_str}",
             "",
         ]
+        plain_lines.extend(_plain_variance_section("OVER DELIVERY:", over_items, "over by"))
+        plain_lines.extend(_plain_variance_section("UNDER DELIVERY:", under_items, "short by"))
+        plain_message = "\n".join(plain_lines).rstrip() + "\n"
 
-        if over_items:
-            lines.append("OVER DELIVERY:")
-            for it in over_items:
-                lines.append(
-                    f"  - {it['item_name']}: invoiced={it['invoiced']}, delivered={it['delivered']} "
-                    f"(over by {it['variance']})"
-                )
-            lines.append("")
-
-        if under_items:
-            lines.append("UNDER DELIVERY:")
-            for it in under_items:
-                lines.append(
-                    f"  - {it['item_name']}: invoiced={it['invoiced']}, delivered={it['delivered']} "
-                    f"(short by {it['variance']})"
-                )
-
-        message = "\n".join(lines)
-        subject = "Over/Under Delivery Notification"
-
-        recipient_list = getattr(settings, "NOTIFICATION_EMAIL_RECIPIENTS", [])
-
-        if recipient_list:
-            sent = send_mail(
-                subject=subject,
-                message=message,
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                recipient_list=recipient_list,
-                fail_silently=True,
+        def _variance_table_rows(items):
+            return "".join(
+                f"""
+            <tr>
+                <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;">{_esc(it['item_name'])}</td>
+                <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:right;">{_esc(it['invoiced'])}</td>
+                <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:right;">{_esc(it['delivered'])}</td>
+                <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:right;font-weight:600;">{_esc(it['variance'])}</td>
+            </tr>"""
+                for it in items
             )
-            if sent > 0:
-                logger.info("Over/under delivery notification sent to %s", recipient_list)
-            else:
-                logger.warning("Over/under delivery email sent count was 0")
+
+        def _variance_table_html(title, items, box_bg, box_border, title_color):
+            if not items:
+                return ""
+            return f"""
+      <div style="margin-bottom:20px;padding:16px;background:{box_bg};border-radius:6px;border:1px solid {box_border};">
+        <h3 style="margin:0 0 12px;font-size:14px;color:{title_color};">{title} ({len(items)} line(s))</h3>
+        <table style="width:100%;border-collapse:collapse;font-size:13px;border:1px solid #e5e7eb;border-radius:6px;background:#fff;">
+          <thead>
+            <tr style="background:#f9fafb;">
+              <th style="padding:10px 12px;text-align:left;font-weight:600;color:#374151;">Item</th>
+              <th style="padding:10px 12px;text-align:right;font-weight:600;color:#374151;">Invoiced</th>
+              <th style="padding:10px 12px;text-align:right;font-weight:600;color:#374151;">Delivered</th>
+              <th style="padding:10px 12px;text-align:right;font-weight:600;color:#374151;">Variance</th>
+            </tr>
+          </thead>
+          <tbody>{_variance_table_rows(items)}
+          </tbody>
+        </table>
+      </div>"""
+
+        over_section_html = _variance_table_html(
+            "Over Delivery",
+            over_items,
+            "#fffbeb",
+            "#fde68a",
+            "#b45309",
+        )
+        under_section_html = _variance_table_html(
+            "Under Delivery",
+            under_items,
+            "#eff6ff",
+            "#bfdbfe",
+            "#1d4ed8",
+        )
+
+        html_message = f"""
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Over/Under Delivery Notification</title>
+</head>
+<body style="margin:0;font-family:Arial,sans-serif;background-color:#f4f4f5;padding:24px;">
+  <div style="max-width:600px;margin:0 auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.08);">
+    <div style="background:linear-gradient(135deg,#d97706 0%,#b45309 100%);color:#fff;padding:20px 24px;">
+      <h1 style="margin:0;font-size:20px;font-weight:600;">Over/Under Delivery</h1>
+      <p style="margin:8px 0 0;font-size:14px;opacity:0.95;">DN #{_esc(dn.dn_no)} · {variance_count} variance(s)</p>
+    </div>
+    <div style="padding:24px;">
+      <p style="margin:0 0 16px;color:#374151;font-size:15px;line-height:1.5;">
+        Delivered quantities on this delivery note do not match the invoice. Review the details below.
+      </p>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:20px;font-size:14px;">
+        <tr><td style="padding:6px 0;color:#6b7280;width:45%;">Delivery Note</td><td style="padding:6px 0;color:#111827;font-weight:500;">{_esc(dn.dn_no)}</td></tr>
+        <tr><td style="padding:6px 0;color:#6b7280;">Order/Sales No</td><td style="padding:6px 0;color:#111827;font-weight:500;">{_esc(dn.sales_no)}</td></tr>
+        <tr><td style="padding:6px 0;color:#6b7280;">Invoice</td><td style="padding:6px 0;color:#111827;font-weight:500;">{_esc(invoice_num)}</td></tr>
+        <tr><td style="padding:6px 0;color:#6b7280;">Customer</td><td style="padding:6px 0;color:#111827;">{_esc(dn.customer_name or '—')}</td></tr>
+        <tr><td style="padding:6px 0;color:#6b7280;">DN Date</td><td style="padding:6px 0;color:#111827;">{_esc(dn_date_str)}</td></tr>
+      </table>
+      {over_section_html}
+      {under_section_html}
+    </div>
+    <div style="padding:12px 24px;background:#f9fafb;font-size:12px;color:#6b7280;text-align:center;">
+      This is an automated notification from the Mohan inventory system.
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+        subject = f"Over/Under Delivery – DN {dn.dn_no} – Invoice {invoice_num}"
+
+        sent = send_mail(
+            subject=subject,
+            message=plain_message,
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=recipient_list,
+            fail_silently=True,
+            html_message=html_message,
+        )
+        if sent > 0:
+            logger.info("Over/under delivery notification sent to %s", recipient_list)
+        else:
+            logger.warning("Over/under delivery email sent count was 0")
     except Exception as e:
         logger.exception("Failed to send over/under delivery notification: %s", e)
 
@@ -397,48 +560,136 @@ def _get_over_under_delivery(dn):
     return over_items, under_items
 
 
-def _check_and_notify_negative_stock():
+def _negative_stock_trigger_context(trigger_dn=None, trigger_grn=None):
+    """Build DN/GRN numbers and transaction date for the alert that triggered the check."""
+    dn_no = (trigger_dn.dn_no if trigger_dn else None) or "—"
+    grn_no = (str(trigger_grn.grn_no) if trigger_grn else None) or "—"
+    if trigger_dn and trigger_dn.date:
+        transaction_date = trigger_dn.date.strftime("%Y-%m-%d")
+    elif trigger_grn and trigger_grn.date:
+        transaction_date = trigger_grn.date.strftime("%Y-%m-%d")
+    else:
+        transaction_date = timezone.now().strftime("%Y-%m-%d %H:%M")
+    return dn_no, grn_no, transaction_date
+
+
+def _check_and_notify_negative_stock(*, trigger_dn=None, trigger_grn=None):
     """Check if any item has negative stock and send email notification if so."""
-    items = Items.objects.all()
     negative_items = []
-    catalog_ids = list(Items.objects.values_list("item_id", flat=True))
-
-    for item in items:
-        grn_qty, grn_bags, dn_qty, dn_bags = _stock_totals_for_catalog_row(
-            item, catalog_ids
-        )
-        stock_quantity = grn_qty - dn_qty
-        stock_bags = grn_bags - dn_bags
-
+    for row in _build_stock_by_code():
+        stock_quantity = float(row.get("quantity") or 0)
+        stock_bags = float(row.get("package") or 0)
         if stock_quantity < 0 or stock_bags < 0:
             negative_items.append({
-                "item_name": item.item_name,
-                "internal_code": item.internal_code or "",
+                "item_name": row["item_name"],
+                "internal_code": row["code"],
                 "quantity": stock_quantity,
                 "package": stock_bags,
+                "grn_nos": row.get("grn_nos") or [],
+                "dn_nos": row.get("dn_nos") or [],
             })
 
     if not negative_items:
         return
 
+    recipient_list = getattr(settings, "NOTIFICATION_EMAIL_RECIPIENTS", [])
+    if not recipient_list:
+        logger.warning("Negative stock alert skipped: no NOTIFICATION_EMAIL_RECIPIENTS")
+        return
+
+    dn_no, grn_no, transaction_date = _negative_stock_trigger_context(
+        trigger_dn=trigger_dn, trigger_grn=trigger_grn
+    )
+
     try:
-        lines = [
-            "The following items have negative stock:",
-            "",
-        ]
-        for ni in negative_items:
-            lines.append(
-                f"  - {ni['item_name']} (code: {ni['internal_code']}): "
-                f"quantity={ni['quantity']}, package={ni['package']}"
-            )
-        message = "\n".join(lines)
+        def _esc(s):
+            return html.escape(str(s) if s is not None else "")
+
+        items_plain_lines = "\n".join(
+            f"  - {ni['item_name']} (code: {ni['internal_code'] or '—'}): "
+            f"quantity={ni['quantity']}, package={ni['package']}"
+            for ni in negative_items
+        )
+        plain_message = (
+            f"NEGATIVE STOCK ALERT\n"
+            f"{'=' * 40}\n\n"
+            f"One or more inventory items are below zero after a stock movement.\n\n"
+            f"TRANSACTION THAT TRIGGERED ALERT\n"
+            f"  DN Number:            {dn_no}\n"
+            f"  GRN Number:           {grn_no}\n"
+            f"  Transaction Date:     {transaction_date}\n\n"
+            f"NEGATIVE ITEMS ({len(negative_items)} line(s))\n"
+            f"{items_plain_lines}\n"
+        )
+
+        items_rows = "".join(
+            f"""
+            <tr>
+                <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;">{_esc(ni['item_name'])}</td>
+                <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;">{_esc(ni['internal_code'] or '—')}</td>
+                <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:right;">{_esc(ni['quantity'])}</td>
+                <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:right;">{_esc(ni['package'])}</td>
+            </tr>"""
+            for ni in negative_items
+        )
+        html_message = f"""
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Negative Stock Alert</title>
+</head>
+<body style="margin:0;font-family:Arial,sans-serif;background-color:#f4f4f5;padding:24px;">
+  <div style="max-width:600px;margin:0 auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.08);">
+    <div style="background:linear-gradient(135deg,#dc2626 0%,#b91c1c 100%);color:#fff;padding:20px 24px;">
+      <h1 style="margin:0;font-size:20px;font-weight:600;">Negative Stock Alert</h1>
+      <p style="margin:8px 0 0;font-size:14px;opacity:0.95;">{len(negative_items)} item(s) below zero</p>
+    </div>
+    <div style="padding:24px;">
+      <p style="margin:0 0 16px;color:#374151;font-size:15px;line-height:1.5;">
+        One or more inventory items are below zero after a stock movement. Review the transaction below and adjust stock or documents as needed.
+      </p>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:20px;font-size:14px;">
+        <tr><td style="padding:6px 0;color:#6b7280;width:45%;">DN Number</td><td style="padding:6px 0;color:#111827;font-weight:500;">{_esc(dn_no)}</td></tr>
+        <tr><td style="padding:6px 0;color:#6b7280;">GRN Number</td><td style="padding:6px 0;color:#111827;font-weight:500;">{_esc(grn_no)}</td></tr>
+        <tr><td style="padding:6px 0;color:#6b7280;">Transaction Date</td><td style="padding:6px 0;color:#111827;font-weight:500;">{_esc(transaction_date)}</td></tr>
+      </table>
+      <h3 style="margin:0 0 12px;font-size:14px;color:#374151;">Negative Items ({len(negative_items)} line(s))</h3>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;border:1px solid #e5e7eb;border-radius:6px;">
+        <thead>
+          <tr style="background:#f9fafb;">
+            <th style="padding:10px 12px;text-align:left;font-weight:600;color:#374151;">Item</th>
+            <th style="padding:10px 12px;text-align:left;font-weight:600;color:#374151;">Code</th>
+            <th style="padding:10px 12px;text-align:right;font-weight:600;color:#374151;">Quantity</th>
+            <th style="padding:10px 12px;text-align:right;font-weight:600;color:#374151;">Package</th>
+          </tr>
+        </thead>
+        <tbody>{items_rows}
+        </tbody>
+      </table>
+    </div>
+    <div style="padding:12px 24px;background:#f9fafb;font-size:12px;color:#6b7280;text-align:center;">
+      This is an automated notification from the Mohan inventory system.
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+        subject_parts = ["Negative Stock Alert"]
+        if dn_no != "—":
+            subject_parts.append(f"DN {dn_no}")
+        if grn_no != "—":
+            subject_parts.append(f"GRN {grn_no}")
 
         sent = send_mail(
-            subject="Negative Stock Alert",
-            message=message,
+            subject=" – ".join(subject_parts),
+            message=plain_message,
             from_email=settings.DEFAULT_FROM_EMAIL,
-            recipient_list=getattr(settings, "NOTIFICATION_EMAIL_RECIPIENTS", []),
+            recipient_list=recipient_list,
             fail_silently=True,
+            html_message=html_message,
         )
         if sent > 0:
             logger.info("Negative stock alert email sent to recipients")
@@ -734,7 +985,7 @@ def create_grn(request, payload: GrnCreateSchema):
             created_items.append(new_item)
 
         _sync_git_rows_for_grn(grn)
-        _check_and_notify_negative_stock()
+        _check_and_notify_negative_stock(trigger_grn=grn)
 
         grn.refresh_from_db()
         return _grn_to_detail(grn)
@@ -860,7 +1111,7 @@ def update_GRN(request, grn_no: str, payload: GrnUpdateSchema):
     grn.refresh_from_db()
     _sync_git_rows_for_grn(grn, previous_qty_by_key)
     if payload.items is not None:
-        _check_and_notify_negative_stock()
+        _check_and_notify_negative_stock(trigger_grn=grn)
     return _grn_to_detail(grn)
 
 
@@ -870,8 +1121,9 @@ def delete_GRN(request, grn_no: str):
     if err:
         return err
     grn = get_object_or_404(GRN, grn_no=int(grn_no) if grn_no.isdigit() else grn_no)
+    trigger_grn = grn
     grn.delete()
-    _check_and_notify_negative_stock()
+    _check_and_notify_negative_stock(trigger_grn=trigger_grn)
     return {"detail": "GRN deleted successfully."}
 
 
@@ -1024,7 +1276,7 @@ def create_dn(request, payload: DnCreateSchema):
         )
         created_items.append(new_item)
 
-    _check_and_notify_negative_stock()
+    _check_and_notify_negative_stock(trigger_dn=dn)
     over_items, under_items = _check_and_notify_over_under_delivery(dn)
 
     # Return structured response
@@ -1181,7 +1433,7 @@ def update_DN(request, dn_no: str, payload: DnUpdateSchema):
             )
     dn.save()
     dn.refresh_from_db()
-    _check_and_notify_negative_stock()
+    _check_and_notify_negative_stock(trigger_dn=dn)
     over_items, under_items = _check_and_notify_over_under_delivery(dn)
 
     result = _dn_to_detail(dn)
@@ -1332,65 +1584,7 @@ def display_stock(
     grn_no: Optional[str] = None,
     dn_no: Optional[str] = None,
 ):
-    # Stock is keyed by GRN/DN line code (business code), not catalog item_id.
-    stock_map: dict[str, dict] = {}
-
-    grn_qs = GrnItems.objects.select_related("grn").all()
-    dn_qs = DNItems.objects.select_related("dn").all()
-
-    if as_of_date:
-        # Date format expected: YYYY-MM-DD
-        grn_qs = grn_qs.filter(grn__date__lte=as_of_date)
-        dn_qs = dn_qs.filter(dn__date__lte=as_of_date)
-
-    for row in grn_qs:
-        row_code = (row.code or row.internal_code or "").strip()
-        if not row_code:
-            continue
-        bucket = stock_map.setdefault(
-            row_code,
-            {
-                "item_id": row.item_id,
-                "item_name": row.item_name,
-                "code": row_code,
-                "internal_code": row_code,
-                "quantity": 0.0,
-                "package": 0.0,
-                "grn_nos": set(),
-                "dn_nos": set(),
-            },
-        )
-        bucket["quantity"] += float(row.quantity or 0)
-        bucket["package"] += float(row.bags or 0)
-        if row.grn_id:
-            bucket["grn_nos"].add(str(row.grn.grn_no))
-
-    for row in dn_qs:
-        row_code = (row.code or row.internal_code or "").strip()
-        if not row_code:
-            continue
-        bucket = stock_map.setdefault(
-            row_code,
-            {
-                "item_id": row.catalog_item_id or row.item_id,
-                "item_name": row.item_name,
-                "code": row_code,
-                "internal_code": row_code,
-                "quantity": 0.0,
-                "package": 0.0,
-                "grn_nos": set(),
-                "dn_nos": set(),
-            },
-        )
-        bucket["quantity"] -= float(row.quantity or 0)
-        bucket["package"] -= float(row.bags or 0)
-        if row.dn_id:
-            bucket["dn_nos"].add(str(row.dn.dn_no))
-
-    rows = list(stock_map.values())
-    for r in rows:
-        r["grn_nos"] = sorted(list(r.get("grn_nos", set())))
-        r["dn_nos"] = sorted(list(r.get("dn_nos", set())))
+    rows = _build_stock_by_code(as_of_date=as_of_date)
 
     if code:
         code_q = code.strip().lower()
