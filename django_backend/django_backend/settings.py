@@ -226,7 +226,7 @@ NOTIFICATION_EMAIL_RECIPIENTS = [
         "NOTIFICATION_EMAIL_RECIPIENTS",
         os.environ.get(
             "OVER_UNDER_DELIVERY_RECIPIENTS",
-            "mekdi1610@gmail.com",
+            "sol@mohanplc.com,Kapil@mohanint.com,Harsh@mohanplc.com,Mayuraddis@gmail.com,Amritakaur2612@gmail.com",
         ),
     ).split(",")
     if r.strip()
