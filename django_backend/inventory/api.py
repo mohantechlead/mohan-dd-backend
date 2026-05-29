@@ -2232,6 +2232,7 @@ def create_purchase(request, payload: PurchaseCreateSchema):
         freight_price=payload.freight_price,
         insurance=payload.insurance,
         shipment_type=payload.shipment_type,
+        remark=(payload.remark or "").strip() or None,
         before_vat=before_vat,
         total_quantity=total_quantity,
         remaining=remaining,
@@ -2272,7 +2273,7 @@ def next_purchase_number(request):
     return {"next_number": _next_mpddfze_purchase_number(values)}
 
 
-@router.get("/purchases/{purchase_number}", response=PurchaseDetailSchema)
+@router.get("/purchases/{purchase_number}", response=PurchaseDetailSchema, auth=JWTAuth())
 def get_purchase_detail(request, purchase_number: str):
     purchase = get_object_or_404(
         Purchase.objects.prefetch_related("items"),
@@ -2343,6 +2344,7 @@ def _purchase_to_detail_schema(purchase, request=None):
         freight_price=float(purchase.freight_price) if purchase.freight_price is not None else None,
         insurance=purchase.insurance,
         shipment_type=purchase.shipment_type,
+        remark=purchase.remark,
         before_vat=float(purchase.before_vat),
         total_quantity=purchase.total_quantity,
         remaining=purchase.remaining,
@@ -2395,6 +2397,7 @@ def update_purchase(request, purchase_number: str, payload: PurchaseUpdateSchema
     purchase.freight_price = payload.freight_price
     purchase.insurance = payload.insurance
     purchase.shipment_type = payload.shipment_type
+    purchase.remark = (payload.remark or "").strip() or None
     before_vat, total_quantity, remaining = _purchase_aggregate_from_line_items(
         payload.items
     )
@@ -2461,7 +2464,7 @@ def update_purchase_status(request, purchase_number: str, payload: PurchaseStatu
     return _purchase_to_detail_schema(purchase, request)
 
 
-@router.get("/purchases", response=List[PurchaseDetailSchema])
+@router.get("/purchases", response=List[PurchaseDetailSchema], auth=JWTAuth())
 def list_purchases(request):
     # Sort newest purchases first by purchase/order number (descending).
     purchases = Purchase.objects.prefetch_related("items").order_by("-purchase_number")
