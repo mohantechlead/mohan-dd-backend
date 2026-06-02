@@ -2231,6 +2231,7 @@ def create_purchase(request, payload: PurchaseCreateSchema):
         freight=payload.freight,
         freight_price=payload.freight_price,
         insurance=payload.insurance,
+        insurance_chargers=(payload.insurance_chargers or "").strip() or None,
         shipment_type=payload.shipment_type,
         remark=(payload.remark or "").strip() or None,
         before_vat=before_vat,
@@ -2343,6 +2344,7 @@ def _purchase_to_detail_schema(purchase, request=None):
         freight=purchase.freight,
         freight_price=float(purchase.freight_price) if purchase.freight_price is not None else None,
         insurance=purchase.insurance,
+        insurance_chargers=purchase.insurance_chargers,
         shipment_type=purchase.shipment_type,
         remark=purchase.remark,
         before_vat=float(purchase.before_vat),
@@ -2396,6 +2398,7 @@ def update_purchase(request, purchase_number: str, payload: PurchaseUpdateSchema
     purchase.freight = payload.freight
     purchase.freight_price = payload.freight_price
     purchase.insurance = payload.insurance
+    purchase.insurance_chargers = (payload.insurance_chargers or "").strip() or None
     purchase.shipment_type = payload.shipment_type
     purchase.remark = (payload.remark or "").strip() or None
     before_vat, total_quantity, remaining = _purchase_aggregate_from_line_items(

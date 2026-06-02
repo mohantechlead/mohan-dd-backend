@@ -384,6 +384,7 @@ class PurchaseCreateSchema(Schema):
     freight: Optional[str] = None
     freight_price: Optional[float]
     insurance: Optional[str]
+    insurance_chargers: Optional[str] = None
     shipment_type: str
     remark: Optional[str] = None
     items: List[PurchaseItemCreateSchema]
@@ -435,6 +436,7 @@ class PurchaseDetailSchema(Schema):
     freight: Optional[str] = None
     freight_price: Optional[float] = None
     insurance: Optional[str] = None
+    insurance_chargers: Optional[str] = None
     shipment_type: Optional[str] = None
     remark: Optional[str] = None
     before_vat: float
@@ -473,6 +475,7 @@ class PurchaseUpdateSchema(Schema):
     freight: Optional[str] = None
     freight_price: Optional[float]
     insurance: Optional[str]
+    insurance_chargers: Optional[str] = None
     shipment_type: str
     remark: Optional[str] = None
     items: List[PurchaseItemCreateSchema]

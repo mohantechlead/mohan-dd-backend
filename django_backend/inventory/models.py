@@ -265,6 +265,7 @@ class Purchase(models.Model):
     freight = models.CharField(max_length=50, blank=True, null=True)
     freight_price = models.DecimalField(max_digits=12, decimal_places=2, blank=True, null=True)
     insurance = models.CharField(max_length=255, blank=True, null=True)
+    insurance_chargers = models.CharField(max_length=255, blank=True, null=True)
     shipment_type = models.CharField(max_length=50)
     remark = models.TextField(blank=True, null=True)
     # Sum of line total_price (same as order total before VAT); remaining mirrors total_quantity for now
