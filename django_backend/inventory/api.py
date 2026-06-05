@@ -5,7 +5,7 @@ import re
 from decimal import Decimal
 from ninja import Router
 from typing import List, Optional
-from datetime import datetime
+from datetime import date as date_type
 from datetime import datetime
 from django.shortcuts import get_object_or_404
 from django.db.models import Q
@@ -278,14 +278,19 @@ def _stock_totals_for_catalog_row(item: Items, catalog_ids: list) -> tuple[float
 
 
 def _build_stock_by_code(as_of_date=None):
-    """Aggregate stock per business code (same logic as GET /stock)."""
+    """Aggregate stock per business code (same logic as GET /stock).
+
+    When as_of_date is set, only GRN/DN lines whose header document date equals
+    that calendar day are included (movements on that date, not cumulative).
+    """
     stock_map: dict[str, dict] = {}
     grn_qs = GrnItems.objects.select_related("grn").all()
     dn_qs = DNItems.objects.select_related("dn").all()
 
-    if as_of_date:
-        grn_qs = grn_qs.filter(grn__date__lte=as_of_date)
-        dn_qs = dn_qs.filter(dn__date__lte=as_of_date)
+    doc_date = _parse_as_of_date(as_of_date)
+    if doc_date:
+        grn_qs = grn_qs.filter(grn__date=doc_date)
+        dn_qs = dn_qs.filter(dn__date=doc_date)
 
     for row in grn_qs:
         row_code = (row.code or row.internal_code or "").strip()
@@ -798,6 +803,82 @@ def _git_key(item_name: str, code: str | None) -> str:
     return f"{(item_name or '').strip().lower()}|{(code or '').strip().lower()}"
 
 
+def _normalize_git_match(value: str | None) -> str:
+    return " ".join((value or "").strip().split()).lower()
+
+
+def _measurement_is_kg(measurement: str | None) -> bool:
+    m = (measurement or "").strip().upper().replace(" ", "")
+    if not m:
+        return False
+    if m in ("KG", "KGS"):
+        return True
+    if m.startswith("KG"):
+        return True
+    if "KILOGRAM" in m:
+        return True
+    return False
+
+
+def _quantity_to_mt(quantity: float, measurement: str | None) -> float:
+    qty = float(quantity or 0)
+    if _measurement_is_kg(measurement):
+        return qty / 1000.0
+    return qty
+
+
+def _purchase_line_quantity(
+    purchase: Purchase | None,
+    item_name: str,
+    code: str | None,
+) -> float:
+    """PO line qty for GIT (MT): match item name + HS code when GRN has a code."""
+    if not purchase:
+        return 0.0
+    target_name = _normalize_git_match(item_name)
+    target_code = (code or "").strip().lower() or None
+    lines = [
+        p
+        for p in purchase.items.all()
+        if _normalize_git_match(p.item_name) == target_name
+    ]
+    if not lines:
+        return 0.0
+
+    if target_code:
+        coded = [
+            p
+            for p in lines
+            if (p.hscode or "").strip().lower() == target_code
+        ]
+        if coded:
+            return sum(
+                _quantity_to_mt(float(p.quantity or 0), p.measurement) for p in coded
+            )
+
+    if len(lines) == 1:
+        p = lines[0]
+        return _quantity_to_mt(float(p.quantity or 0), p.measurement)
+
+    if target_code:
+        return 0.0
+
+    return sum(
+        _quantity_to_mt(float(p.quantity or 0), p.measurement) for p in lines
+    )
+
+
+def _resolve_git_purchase_quantity(row: GIT) -> float:
+    purchase = (
+        Purchase.objects.filter(
+            purchase_number__iexact=(row.purchase_no or "").strip()
+        )
+        .prefetch_related("items")
+        .first()
+    )
+    return _purchase_line_quantity(purchase, row.item_name, row.code)
+
+
 def _grn_qty_map(grn: GRN) -> dict[str, dict]:
     out: dict[str, dict] = {}
     for gi in grn.items.all():
@@ -813,10 +894,13 @@ def _grn_qty_map(grn: GRN) -> dict[str, dict]:
 
 
 def _purchase_qty_map(purchase: Purchase) -> dict[str, float]:
+    """Legacy aggregate map (item name only); prefer _purchase_line_quantity."""
     out: dict[str, float] = {}
     for p in purchase.items.all():
         key = _git_key(p.item_name, None)
-        out[key] = out.get(key, 0.0) + float(p.quantity or 0)
+        out[key] = out.get(key, 0.0) + _quantity_to_mt(
+            float(p.quantity or 0), p.measurement
+        )
     return out
 
 
@@ -832,8 +916,7 @@ def _upsert_git_running_variance(
         return
 
     code_value = (code or "").strip() or None
-    purchase_key = _git_key(item_name, None)
-    purchase_qty = float(_purchase_qty_map(purchase).get(purchase_key, 0.0))
+    purchase_qty = _purchase_line_quantity(purchase, item_name, code)
 
     rows = list(
         GIT.objects.filter(
@@ -1616,17 +1699,34 @@ def display_stock(
     return rows
 
 
+def _parse_as_of_date(value) -> date_type | None:
+    if value is None:
+        return None
+    if isinstance(value, date_type):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return date_type.fromisoformat(text[:10])
+    except ValueError:
+        return None
+
+
 def _git_to_schema(row: GIT) -> GitSchema:
+    purchase_qty = _resolve_git_purchase_quantity(row)
+    received_qty = float(row.received_quantity or 0)
+    variance = received_qty - purchase_qty
     return GitSchema(
         id=row.id,
         grn_no=str(row.grn.grn_no),
         purchase_no=row.purchase_no,
         item_name=row.item_name,
         code=row.code,
-        purchase_quantity=float(row.purchase_quantity or 0),
-        received_quantity=float(row.received_quantity or 0),
-        variance_quantity=float(row.variance_quantity or 0),
-        variance_type=row.variance_type,
+        purchase_quantity=purchase_qty,
+        received_quantity=received_qty,
+        variance_quantity=abs(variance),
+        variance_type="increased" if variance >= 0 else "decreased",
     )
 
 
@@ -1705,8 +1805,10 @@ def wipe_off_git_row(request, git_id: uuid.UUID):
     if err:
         return err
     row = get_object_or_404(GIT.objects.select_related("grn"), id=git_id)
+    purchase_qty = _resolve_git_purchase_quantity(row)
     row.variance_quantity = 0
-    row.received_quantity = row.purchase_quantity
+    row.received_quantity = purchase_qty
+    row.purchase_quantity = purchase_qty
     row.save()
     row.refresh_from_db()
     return _git_to_schema(row)
