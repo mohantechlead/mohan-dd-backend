@@ -526,6 +526,7 @@ class ShippingInvoiceCreateSchema(Schema):
 
 
 class ShippingInvoiceUpdateSchema(Schema):
+    invoice_number: str
     invoice_date: date
     waybill_number: Optional[str]
     ecd_no: Optional[str]

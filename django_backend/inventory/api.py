@@ -2746,6 +2746,27 @@ def update_shipping_invoice(
         ShippingInvoice.objects.prefetch_related("items", "order"), id=invoice_id
     )
 
+    new_invoice_number = (payload.invoice_number or "").strip()
+    if not new_invoice_number:
+        return JsonResponse(
+            {"detail": "Invoice number cannot be empty."},
+            status=400,
+        )
+    old_invoice_number = invoice.invoice_number
+    if new_invoice_number.lower() != old_invoice_number.lower():
+        if ShippingInvoice.objects.filter(
+            invoice_number__iexact=new_invoice_number
+        ).exclude(id=invoice.id).exists():
+            return JsonResponse(
+                {"detail": "Invoice number already exists."},
+                status=400,
+            )
+        DN.objects.filter(
+            sales_no=invoice.order.order_number,
+            invoice_no__iexact=old_invoice_number,
+        ).update(invoice_no=new_invoice_number)
+        invoice.invoice_number = new_invoice_number
+
     invoice.invoice_date = payload.invoice_date
     invoice.waybill_number = payload.waybill_number
     invoice.ecd_no = payload.ecd_no
