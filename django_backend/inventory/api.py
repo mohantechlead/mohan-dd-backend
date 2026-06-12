@@ -13,10 +13,48 @@ from django.core.mail import send_mail
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
-from django.core.mail import send_mail
-from django.conf import settings
 
-logger = logging.getLogger(__name__)
+
+def _send_notification_mail(
+    *,
+    subject: str,
+    message: str,
+    recipient_list: list,
+    html_message: str | None = None,
+    fail_silently: bool = True,
+) -> int:
+    """Log email content to the console, then send via configured EMAIL_BACKEND."""
+    logger.info(
+        "\n========== NOTIFICATION EMAIL ==========\n"
+        "Backend: %s\n"
+        "From: %s\n"
+        "To: %s\n"
+        "Subject: %s\n"
+        "---------- plain text ----------\n%s\n"
+        "======================================",
+        getattr(settings, "EMAIL_BACKEND", ""),
+        settings.DEFAULT_FROM_EMAIL,
+        ", ".join(recipient_list or []),
+        subject,
+        message,
+    )
+    if html_message:
+        preview = (
+            html_message
+            if len(html_message) <= 2000
+            else html_message[:2000] + "\n... (html truncated)"
+        )
+        logger.info("---------- html ----------\n%s", preview)
+    return send_mail(
+        subject=subject,
+        message=message,
+        from_email=settings.DEFAULT_FROM_EMAIL,
+        recipient_list=recipient_list,
+        fail_silently=fail_silently,
+        html_message=html_message,
+    )
+
+
 from ninja_jwt.authentication import JWTAuth
 from accounts.models import Partner
 from .models import (
@@ -358,9 +396,71 @@ def _resolve_dn_invoice_number(dn) -> str:
     return invoice_num
 
 
+def _normalize_mass_unit(unit) -> str:
+    return (unit or "").strip().upper().replace("  ", " ")
+
+
+def _is_kg_mass_unit(unit) -> bool:
+    n = _normalize_mass_unit(unit)
+    if not n:
+        return False
+    if n in ("KG", "KGS") or n.startswith("KG"):
+        return True
+    return "KILOGRAM" in n
+
+
+def _is_mt_mass_unit(unit) -> bool:
+    n = _normalize_mass_unit(unit)
+    if not n:
+        return False
+    if n in ("MT", "M/T", "TON", "TONS", "TONNE", "TONNES"):
+        return True
+    return "METRIC" in n and "TON" in n
+
+
+def _quantity_to_mt(quantity, unit) -> float:
+    """Convert mass quantity to MT; KG is divided by 1000."""
+    qty = float(quantity or 0)
+    if _is_kg_mass_unit(unit):
+        return qty / 1000.0
+    return qty
+
+
+def _comparison_unit_label(invoice_unit, delivered_units) -> str:
+    units = [_normalize_mass_unit(invoice_unit), *map(_normalize_mass_unit, delivered_units)]
+    if any(_is_kg_mass_unit(u) for u in units):
+        return "MT"
+    if any(_is_mt_mass_unit(u) for u in units):
+        return "MT"
+    return _normalize_mass_unit(invoice_unit) or "—"
+
+
+def _apply_dn_is_last_flag(dn, is_last: bool):
+    """Persist is_last and ensure only one final DN per invoice when marked last."""
+    dn.is_last = bool(is_last)
+    if dn.is_last:
+        invoice_no = (dn.invoice_no or "").strip()
+        if invoice_no:
+            DN.objects.filter(
+                sales_no=dn.sales_no,
+                invoice_no__iexact=invoice_no,
+            ).exclude(pk=dn.pk).update(is_last=False)
+
+
+def _maybe_notify_over_under_delivery(dn):
+    """
+    Send over/under email only when this DN is marked as the final delivery
+    for its invoice (one invoice can have many DNs).
+    """
+    if not dn.is_last:
+        return [], []
+    return _check_and_notify_over_under_delivery(dn)
+
+
 def _check_and_notify_over_under_delivery(dn):
     """
-    Compare DN total delivered quantities vs Invoice. Send email if variances exist.
+    Compare total delivered quantities vs invoice across all DNs for this invoice.
+    Send email if variances exist.
     Returns (over_items, under_items) for API response.
     """
     over_items, under_items = _get_over_under_delivery(dn)
@@ -385,9 +485,12 @@ def _check_and_notify_over_under_delivery(dn):
                 return []
             section = [title]
             for it in items:
+                unit = it.get("unit")
+                unit_suffix = f" {unit}" if unit else ""
                 section.append(
-                    f"  - {it['item_name']}: invoiced={it['invoiced']}, "
-                    f"delivered={it['delivered']} ({variance_label} {it['variance']})"
+                    f"  - {it['item_name']}: invoiced={it['invoiced']}{unit_suffix}, "
+                    f"delivered={it['delivered']}{unit_suffix} "
+                    f"({variance_label} {it['variance']}{unit_suffix})"
                 )
             section.append("")
             return section
@@ -396,7 +499,7 @@ def _check_and_notify_over_under_delivery(dn):
             "OVER/UNDER DELIVERY NOTIFICATION",
             "=" * 40,
             "",
-            "Delivered quantities on this delivery note do not match the invoice.",
+            "Total delivered quantities for this invoice (all DNs) do not match the invoice.",
             "",
             "DELIVERY DETAILS",
             f"  Delivery Note:        {dn.dn_no}",
@@ -473,7 +576,7 @@ def _check_and_notify_over_under_delivery(dn):
     </div>
     <div style="padding:24px;">
       <p style="margin:0 0 16px;color:#374151;font-size:15px;line-height:1.5;">
-        Delivered quantities on this delivery note do not match the invoice. Review the details below.
+        Total delivered quantities for this invoice (all delivery notes) do not match the invoice. Review the details below.
       </p>
       <table style="width:100%;border-collapse:collapse;margin-bottom:20px;font-size:14px;">
         <tr><td style="padding:6px 0;color:#6b7280;width:45%;">Delivery Note</td><td style="padding:6px 0;color:#111827;font-weight:500;">{_esc(dn.dn_no)}</td></tr>
@@ -495,12 +598,10 @@ def _check_and_notify_over_under_delivery(dn):
 
         subject = f"Over/Under Delivery – DN {dn.dn_no} – Invoice {invoice_num}"
 
-        sent = send_mail(
+        sent = _send_notification_mail(
             subject=subject,
             message=plain_message,
-            from_email=settings.DEFAULT_FROM_EMAIL,
             recipient_list=recipient_list,
-            fail_silently=True,
             html_message=html_message,
         )
         if sent > 0:
@@ -513,6 +614,194 @@ def _check_and_notify_over_under_delivery(dn):
     return over_items, under_items
 
 
+def _resolve_shipping_invoice_for_dn(dn):
+    invoice_no = (dn.invoice_no or "").strip()
+    if not invoice_no:
+        return None
+    order = Order.objects.filter(order_number=dn.sales_no).first()
+    if not order:
+        return None
+    return ShippingInvoice.objects.filter(
+        order=order,
+        invoice_number__iexact=invoice_no,
+    ).prefetch_related("items").first()
+
+
+def _get_related_dns_for_invoice(dn):
+    """All DNs on the same order + invoice as the given DN."""
+    invoice_no = (dn.invoice_no or "").strip()
+    if not invoice_no:
+        return []
+    related_qs = (
+        DN.objects.filter(
+            sales_no=dn.sales_no,
+            invoice_no__iexact=invoice_no,
+        )
+        .prefetch_related("dn_items")
+        .order_by("date", "dn_no")
+    )
+    return [
+        {
+            "dn_no": related.dn_no,
+            "date": related.date.isoformat() if related.date else None,
+            "is_last": bool(related.is_last),
+            "is_current": related.pk == dn.pk,
+            "items": [
+                {
+                    "item_name": line.item_name,
+                    "quantity": float(line.quantity or 0),
+                    "unit_measurement": line.unit_measurement,
+                    "code": line.code,
+                }
+                for line in related.dn_items.all()
+            ],
+        }
+        for related in related_qs
+    ]
+
+
+def _enrich_dn_detail(dn):
+    """Attach invoice comparison and related DNs for list/detail views."""
+    result = _dn_to_detail(dn)
+    invoice_no = (dn.invoice_no or "").strip()
+    if not invoice_no:
+        return result
+
+    related = _get_related_dns_for_invoice(dn)
+    if related:
+        result["related_dns"] = related
+
+    invoice_items = _get_dn_invoice_items(dn)
+    if invoice_items:
+        result["invoice_items"] = invoice_items
+
+    delivery_comparison = _get_dn_delivery_comparison(dn)
+    if delivery_comparison:
+        result["delivery_comparison"] = delivery_comparison
+
+    over_items, under_items = _get_over_under_delivery(dn)
+    if over_items:
+        result["over_items"] = over_items
+    if under_items:
+        result["under_items"] = under_items
+    return result
+
+
+def _get_dn_invoice_items(dn):
+    invoice = _resolve_shipping_invoice_for_dn(dn)
+    if not invoice:
+        return []
+    return [
+        {
+            "item_name": inv_item.item_name,
+            "quantity": float(inv_item.quantity or 0),
+            "measurement": inv_item.measurement or "",
+            "code": inv_item.code,
+        }
+        for inv_item in invoice.items.all()
+    ]
+
+
+def _get_dn_delivery_comparison(dn):
+    """
+    Invoiced vs delivered summary per invoice line item.
+    KG DN lines are ÷ 1000 when compared to MT invoice quantities.
+    """
+    comparison = []
+    try:
+        invoice = _resolve_shipping_invoice_for_dn(dn)
+        if not invoice:
+            return comparison
+
+        invoiced_by_item: dict[str, dict] = {}
+        for inv_item in invoice.items.all():
+            name = inv_item.item_name
+            bucket = invoiced_by_item.setdefault(
+                name,
+                {"qty": 0.0, "unit": inv_item.measurement or ""},
+            )
+            bucket["qty"] += float(inv_item.quantity or 0)
+            if not bucket["unit"] and inv_item.measurement:
+                bucket["unit"] = inv_item.measurement
+
+        this_dn_by_item: dict[str, dict] = {}
+        for dn_line in dn.dn_items.all():
+            bucket = this_dn_by_item.setdefault(
+                dn_line.item_name,
+                {"qty": 0.0, "unit": dn_line.unit_measurement or ""},
+            )
+            bucket["qty"] += float(dn_line.quantity or 0)
+            if not bucket["unit"] and dn_line.unit_measurement:
+                bucket["unit"] = dn_line.unit_measurement
+
+        invoice_no = (dn.invoice_no or "").strip()
+        related_dns = list(
+            DN.objects.filter(
+                sales_no=dn.sales_no,
+                invoice_no__iexact=invoice_no,
+            )
+            .prefetch_related("dn_items")
+            .order_by("date", "dn_no")
+        ) if invoice_no else []
+
+        for item_name, inv_data in invoiced_by_item.items():
+            invoice_unit = inv_data["unit"]
+            invoiced_raw = float(inv_data["qty"])
+            total_invoiced = _quantity_to_mt(invoiced_raw, invoice_unit)
+
+            dn_line_qs = DNItems.objects.filter(
+                dn__sales_no=dn.sales_no,
+                item_name=item_name,
+            )
+            if invoice_no:
+                dn_line_qs = dn_line_qs.filter(dn__invoice_no__iexact=invoice_no)
+            dn_lines = dn_line_qs
+            delivered_units = []
+            total_delivered = 0.0
+            for dn_line in dn_lines:
+                dn_unit = dn_line.unit_measurement or ""
+                delivered_units.append(dn_unit)
+                total_delivered += _quantity_to_mt(
+                    dn_line.quantity or 0,
+                    dn_unit,
+                )
+
+            this_dn = this_dn_by_item.get(item_name, {"qty": 0.0, "unit": ""})
+            unit_label = _comparison_unit_label(invoice_unit, delivered_units)
+
+            per_dn_deliveries = []
+            for related in related_dns:
+                line_qty = 0.0
+                line_unit = ""
+                for dn_line in related.dn_items.all():
+                    if dn_line.item_name != item_name:
+                        continue
+                    line_qty += float(dn_line.quantity or 0)
+                    if not line_unit and dn_line.unit_measurement:
+                        line_unit = dn_line.unit_measurement or ""
+                per_dn_deliveries.append({
+                    "dn_no": related.dn_no,
+                    "quantity": round(line_qty, 6),
+                    "unit_measurement": line_unit or None,
+                    "is_current": related.pk == dn.pk,
+                })
+
+            comparison.append({
+                "item_name": item_name,
+                "invoiced_quantity": round(invoiced_raw, 6),
+                "invoiced_unit": invoice_unit or None,
+                "delivered_total": round(total_delivered, 6),
+                "this_dn_quantity": round(float(this_dn["qty"]), 6),
+                "this_dn_unit": this_dn["unit"] or None,
+                "comparison_unit": unit_label,
+                "variance": round(total_delivered - total_invoiced, 6),
+                "per_dn_deliveries": per_dn_deliveries,
+            })
+    except Exception as e:
+        logger.exception("DN delivery comparison compute failed: %s", e)
+    return comparison
+
+
 def _get_over_under_delivery(dn):
     """
     Compute over/under delivery variances vs invoice. Does NOT send email.
@@ -520,45 +809,33 @@ def _get_over_under_delivery(dn):
     """
     over_items = []
     under_items = []
+    tolerance = 1e-6
     try:
-        invoice_no = (dn.invoice_no or "").strip()
-        if not invoice_no:
-            return over_items, under_items
-        order = Order.objects.filter(order_number=dn.sales_no).first()
-        if not order:
-            return over_items, under_items
-        invoice = ShippingInvoice.objects.filter(
-            order=order,
-            invoice_number__iexact=invoice_no,
-        ).prefetch_related("items").first()
-        if not invoice:
-            return over_items, under_items
-        invoiced_by_item = {}
-        for inv_item in invoice.items.all():
-            name = inv_item.item_name
-            qty = float(inv_item.quantity or 0)
-            invoiced_by_item[name] = invoiced_by_item.get(name, 0) + qty
-        for item_name, total_invoiced in invoiced_by_item.items():
-            total_delivered = float(
-                DNItems.objects.filter(
-                    dn__sales_no=dn.sales_no,
-                    item_name=item_name,
-                ).aggregate(total=Sum("quantity"))["total"]
-                or 0
+        for row in _get_dn_delivery_comparison(dn):
+            invoiced_cmp = _quantity_to_mt(
+                row["invoiced_quantity"],
+                row.get("invoiced_unit"),
             )
-            if total_delivered > total_invoiced:
+            delivered = row["delivered_total"]
+            unit_label = row.get("comparison_unit")
+
+            if delivered > invoiced_cmp + tolerance:
+                variance = delivered - invoiced_cmp
                 over_items.append({
-                    "item_name": item_name,
-                    "invoiced": total_invoiced,
-                    "delivered": total_delivered,
-                    "variance": total_delivered - total_invoiced,
+                    "item_name": row["item_name"],
+                    "invoiced": round(invoiced_cmp, 6),
+                    "delivered": round(delivered, 6),
+                    "variance": round(variance, 6),
+                    "unit": unit_label,
                 })
-            elif total_delivered < total_invoiced:
+            elif delivered < invoiced_cmp - tolerance:
+                variance = invoiced_cmp - delivered
                 under_items.append({
-                    "item_name": item_name,
-                    "invoiced": total_invoiced,
-                    "delivered": total_delivered,
-                    "variance": total_invoiced - total_delivered,
+                    "item_name": row["item_name"],
+                    "invoiced": round(invoiced_cmp, 6),
+                    "delivered": round(delivered, 6),
+                    "variance": round(variance, 6),
+                    "unit": unit_label,
                 })
     except Exception as e:
         logger.exception("Over/under delivery compute failed: %s", e)
@@ -688,12 +965,10 @@ def _check_and_notify_negative_stock(*, trigger_dn=None, trigger_grn=None):
         if grn_no != "—":
             subject_parts.append(f"GRN {grn_no}")
 
-        sent = send_mail(
+        sent = _send_notification_mail(
             subject=" – ".join(subject_parts),
             message=plain_message,
-            from_email=settings.DEFAULT_FROM_EMAIL,
             recipient_list=recipient_list,
-            fail_silently=True,
             html_message=html_message,
         )
         if sent > 0:
@@ -1252,7 +1527,6 @@ def create_dn(request, payload: DnCreateSchema):
 
     invoice_no = (payload.invoice_no or "").strip()
     if invoice_no:
-        # Verify invoice belongs to this order
         invoice = ShippingInvoice.objects.filter(
             invoice_number__iexact=invoice_no,
         ).select_related("order").first()
@@ -1266,57 +1540,6 @@ def create_dn(request, payload: DnCreateSchema):
                 {
                     "detail": f"Invoice '{invoice_no}' does not belong to order '{payload.sales_no}'. "
                     "Order number and invoice number must match."
-                },
-                status=400,
-            )
-        # One DN per invoice: cannot create if DN already exists for this invoice
-        existing = DN.objects.filter(
-            sales_no=payload.sales_no,
-            invoice_no__iexact=invoice_no,
-        ).first()
-        if existing:
-            return JsonResponse(
-                {
-                    "detail": f"A Delivery Note (DN {existing.dn_no}) already exists for this invoice. "
-                    "Please edit the existing one instead of creating a new one."
-                },
-                status=400,
-            )
-    if DN.objects.filter(dn_no=payload.dn_no).exists():
-        return JsonResponse(
-            {"detail": f"Delivery number '{payload.dn_no}' already exists."},
-            status=400,
-        )
-
-    invoice_no = (payload.invoice_no or "").strip()
-    if invoice_no:
-        # Verify invoice belongs to this order
-        invoice = ShippingInvoice.objects.filter(
-            invoice_number__iexact=invoice_no,
-        ).select_related("order").first()
-        if not invoice:
-            return JsonResponse(
-                {"detail": f"Invoice '{invoice_no}' not found."},
-                status=400,
-            )
-        if invoice.order.order_number != payload.sales_no:
-            return JsonResponse(
-                {
-                    "detail": f"Invoice '{invoice_no}' does not belong to order '{payload.sales_no}'. "
-                    "Order number and invoice number must match."
-                },
-                status=400,
-            )
-        # One DN per invoice: cannot create if DN already exists for this invoice
-        existing = DN.objects.filter(
-            sales_no=payload.sales_no,
-            invoice_no__iexact=invoice_no,
-        ).first()
-        if existing:
-            return JsonResponse(
-                {
-                    "detail": f"A Delivery Note (DN {existing.dn_no}) already exists for this invoice. "
-                    "Please edit the existing one instead of creating a new one."
                 },
                 status=400,
             )
@@ -1326,79 +1549,55 @@ def create_dn(request, payload: DnCreateSchema):
     except ValueError as e:
         return JsonResponse({"detail": str(e)}, status=400)
 
-    # Create DN
-    dn = DN.objects.create(
-        id=uuid.uuid4(),
-        customer_name=payload.customer_name,
-        dn_no=payload.dn_no,
-        plate_no=payload.plate_no,
-        sales_no=payload.sales_no,
-        date = payload.date,
-        ECD_no = payload.ECD_no,
-        invoice_no = payload.invoice_no,
-        gatepass_no = payload.gatepass_no,
-        despathcher_name = payload.despathcher_name,
-        receiver_name = payload.receiver_name,
-        authorized_by = payload.authorized_by,
-        remark=(payload.remark or "").strip() or None,
-    )
-
-    # Create Items
-    created_items = []
-    for item in validated_items:
-        new_item = DNItems.objects.create(
-            item_id=uuid.uuid4(),
-            catalog_item_id=item["catalog_item_id"],
-            dn=dn,
-            item_name=item["item_name"],
-            quantity=item["quantity"],
-            unit_measurement=item["unit_measurement"],
-            internal_code=item["internal_code"],
-            code=item["code"],
-            bags=item["bags"],
+    try:
+        dn = DN.objects.create(
+            id=uuid.uuid4(),
+            customer_name=payload.customer_name,
+            dn_no=payload.dn_no,
+            plate_no=payload.plate_no,
+            sales_no=payload.sales_no,
+            date=payload.date,
+            ECD_no=payload.ECD_no,
+            invoice_no=payload.invoice_no,
+            gatepass_no=payload.gatepass_no,
+            despathcher_name=payload.despathcher_name,
+            receiver_name=payload.receiver_name,
+            authorized_by=payload.authorized_by,
+            remark=(payload.remark or "").strip() or None,
+            is_last=bool(payload.is_last),
         )
-        created_items.append(new_item)
+        _apply_dn_is_last_flag(dn, dn.is_last)
 
-    _check_and_notify_negative_stock(trigger_dn=dn)
-    over_items, under_items = _check_and_notify_over_under_delivery(dn)
+        for item in validated_items:
+            DNItems.objects.create(
+                item_id=uuid.uuid4(),
+                catalog_item_id=item["catalog_item_id"],
+                dn=dn,
+                item_name=item["item_name"],
+                quantity=item["quantity"],
+                unit_measurement=item["unit_measurement"],
+                internal_code=item["internal_code"],
+                code=item["code"],
+                bags=item["bags"],
+            )
 
-    # Return structured response
-    result = {
-        "id": dn.id,
-        "customer_name": dn.customer_name,
-        "dn_no": dn.dn_no,
-        "plate_no": dn.plate_no,
-        "sales_no": dn.sales_no,
-        "remark": dn.remark,
-        "items": [
-            {
-                "code": i.code,
-                "item_name": i.item_name,
-                "quantity": i.quantity,
-                "unit_measurement": i.unit_measurement,
-                "internal_code": i.internal_code,
-                "bags": float(i.bags) if i.bags is not None else None,
-            }
-            for i in created_items
-        ],
-    }
-    if over_items:
-        result["over_items"] = over_items
-    if under_items:
-        result["under_items"] = under_items
-    return result
+        _check_and_notify_negative_stock(trigger_dn=dn)
+        _maybe_notify_over_under_delivery(dn)
+
+        dn.refresh_from_db()
+        return _enrich_dn_detail(dn)
+    except Exception as e:
+        logger.exception("DN create failed: %s", e)
+        return JsonResponse(
+            {"detail": str(e), "message": "Failed to create delivery note."},
+            status=500,
+        )
 
 
 @router.get("/dn/{dn_no}", response=DnDetailSchema)
 def get_DN(request, dn_no: str):
     dn = get_object_or_404(DN.objects.prefetch_related("dn_items"), dn_no=dn_no)
-    result = _dn_to_detail(dn)
-    over_items, under_items = _get_over_under_delivery(dn)
-    if over_items:
-        result["over_items"] = over_items
-    if under_items:
-        result["under_items"] = under_items
-    return result
+    return _enrich_dn_detail(dn)
 
 
 @router.put("/dn/{dn_no}", response=DnDetailSchema, auth=JWTAuth())
@@ -1427,51 +1626,6 @@ def update_DN(request, dn_no: str, payload: DnUpdateSchema):
                 },
                 status=400,
             )
-        existing = DN.objects.filter(
-            sales_no=new_sales_no,
-            invoice_no__iexact=new_invoice_no,
-        ).exclude(dn_no=dn.dn_no).first()
-        if existing:
-            return JsonResponse(
-                {
-                    "detail": f"A Delivery Note (DN {existing.dn_no}) already exists for this invoice. "
-                    "Please edit that one instead."
-                },
-                status=400,
-            )
-
-
-    new_sales_no = payload.sales_no if payload.sales_no is not None else dn.sales_no
-    new_invoice_no = (payload.invoice_no or "").strip() if payload.invoice_no is not None else (dn.invoice_no or "")
-    if new_invoice_no:
-        invoice = ShippingInvoice.objects.filter(
-            invoice_number__iexact=new_invoice_no,
-        ).select_related("order").first()
-        if not invoice:
-            return JsonResponse(
-                {"detail": f"Invoice '{new_invoice_no}' not found."},
-                status=400,
-            )
-        if invoice.order.order_number != new_sales_no:
-            return JsonResponse(
-                {
-                    "detail": f"Invoice '{new_invoice_no}' does not belong to order '{new_sales_no}'. "
-                    "Order number and invoice number must match."
-                },
-                status=400,
-            )
-        existing = DN.objects.filter(
-            sales_no=new_sales_no,
-            invoice_no__iexact=new_invoice_no,
-        ).exclude(dn_no=dn.dn_no).first()
-        if existing:
-            return JsonResponse(
-                {
-                    "detail": f"A Delivery Note (DN {existing.dn_no}) already exists for this invoice. "
-                    "Please edit that one instead."
-                },
-                status=400,
-            )
 
     if payload.customer_name is not None:
         dn.customer_name = payload.customer_name
@@ -1495,6 +1649,8 @@ def update_DN(request, dn_no: str, payload: DnUpdateSchema):
         dn.authorized_by = payload.authorized_by
     if payload.remark is not None:
         dn.remark = (payload.remark or "").strip() or None
+    if payload.is_last is not None:
+        _apply_dn_is_last_flag(dn, payload.is_last)
     if payload.items is not None:
         try:
             validated_items = _validate_dn_items(payload.items)
@@ -1517,7 +1673,7 @@ def update_DN(request, dn_no: str, payload: DnUpdateSchema):
     dn.save()
     dn.refresh_from_db()
     _check_and_notify_negative_stock(trigger_dn=dn)
-    over_items, under_items = _check_and_notify_over_under_delivery(dn)
+    over_items, under_items = _maybe_notify_over_under_delivery(dn)
 
     result = _dn_to_detail(dn)
     if over_items:
@@ -1552,6 +1708,7 @@ def _dn_to_detail(dn):
         "receiver_name": dn.receiver_name,
         "authorized_by": dn.authorized_by,
         "remark": dn.remark,
+        "is_last": bool(dn.is_last),
         "items": [
             {
                 "code": item.code,
@@ -1570,29 +1727,7 @@ def _dn_to_detail(dn):
 def list_DN(request):
     try:
         dns = DN.objects.prefetch_related("dn_items").all()
-        result = []
-        for dn in dns:
-            result.append(
-                DnDetailSchema(
-                    id=dn.id,
-                    customer_name=dn.customer_name,
-                    dn_no=dn.dn_no,
-                    sales_no=dn.sales_no,
-                    remark=dn.remark,
-                    items=[
-                        DnItemSchema(
-                            code=item.code,
-                            item_name=item.item_name,
-                            quantity=item.quantity,
-                            unit_measurement=item.unit_measurement,
-                            internal_code=item.internal_code,
-                            bags=float(item.bags) if item.bags is not None else None,
-                        )
-                        for item in dn.dn_items.all()
-                    ]
-                )
-            )
-        return result
+        return [_enrich_dn_detail(dn) for dn in dns]
     except Exception as e:
         print("DN endpoint error:", e)
         traceback.print_exc()
@@ -2995,12 +3130,10 @@ def authorize_shipping_invoice(request, invoice_id: uuid.UUID):
 </body>
 </html>
 """
-        sent = send_mail(
+        sent = _send_notification_mail(
             subject=f"Loading Instruction Authorized – Invoice #{invoice.invoice_number} (Order {invoice.order.order_number})",
             message=plain_message,
-            from_email=settings.DEFAULT_FROM_EMAIL,
             recipient_list=recipient_list,
-            fail_silently=True,
             html_message=html_message,
         )
         if sent == 0:

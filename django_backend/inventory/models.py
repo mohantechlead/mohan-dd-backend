@@ -60,6 +60,8 @@ class DN(models.Model):
     receiver_phone = models.CharField(max_length=20, blank=True, null=True)
     authorized_by = models.CharField(max_length=255, blank=True, null=True)
     remark = models.TextField(blank=True, null=True)
+    # When True, over/under delivery is evaluated across all DNs for this invoice.
+    is_last = models.BooleanField(default=False)
 
     def __str__(self):
         return f"{self.dn_no} ({self.customer_name})"

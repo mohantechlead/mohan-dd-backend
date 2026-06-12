@@ -118,16 +118,17 @@ class DnItemCreateSchema(Schema):
 class DnCreateSchema(Schema):
     customer_name: str
     dn_no: str
-    plate_no: str
+    plate_no: str = ""
     sales_no: str
     date: datetime_date
-    ECD_no: str
+    ECD_no: str = ""
     invoice_no: str
-    gatepass_no: str
-    despathcher_name: str
-    receiver_name: str
-    authorized_by: str
+    gatepass_no: str = ""
+    despathcher_name: str = ""
+    receiver_name: str = ""
+    authorized_by: str = ""
     remark: Optional[str] = None
+    is_last: bool = False
     items: List[DnItemCreateSchema]
 
 # Response schema
@@ -145,6 +146,48 @@ class OverUnderItemSchema(Schema):
     invoiced: float
     delivered: float
     variance: float
+    unit: Optional[str] = None
+
+
+class DnInvoiceItemSchema(Schema):
+    item_name: str
+    quantity: float
+    measurement: Optional[str] = None
+    code: Optional[str] = None
+
+
+class DnPerDnDeliverySchema(Schema):
+    dn_no: str
+    quantity: float
+    unit_measurement: Optional[str] = None
+    is_current: Optional[bool] = False
+
+
+class DnDeliveryComparisonSchema(Schema):
+    item_name: str
+    invoiced_quantity: float
+    invoiced_unit: Optional[str] = None
+    delivered_total: float
+    this_dn_quantity: float
+    this_dn_unit: Optional[str] = None
+    comparison_unit: Optional[str] = None
+    variance: float
+    per_dn_deliveries: Optional[List[DnPerDnDeliverySchema]] = None
+
+
+class DnRelatedItemSchema(Schema):
+    item_name: str
+    quantity: float
+    unit_measurement: Optional[str] = None
+    code: Optional[str] = None
+
+
+class DnRelatedSchema(Schema):
+    dn_no: str
+    date: Optional[str] = None
+    is_last: Optional[bool] = False
+    is_current: Optional[bool] = False
+    items: List[DnRelatedItemSchema] = []
 
 
 class DnDetailSchema(Schema):
@@ -161,7 +204,11 @@ class DnDetailSchema(Schema):
     receiver_name: Optional[str] = None
     authorized_by: Optional[str] = None
     remark: Optional[str] = None
+    is_last: Optional[bool] = False
     items: Optional[List[DnItemSchema]] = []
+    invoice_items: Optional[List[DnInvoiceItemSchema]] = None
+    delivery_comparison: Optional[List[DnDeliveryComparisonSchema]] = None
+    related_dns: Optional[List[DnRelatedSchema]] = None
     over_items: Optional[List[OverUnderItemSchema]] = None
     under_items: Optional[List[OverUnderItemSchema]] = None
 
@@ -178,6 +225,7 @@ class DnUpdateSchema(Schema):
     receiver_name: str | None = None
     authorized_by: str | None = None
     remark: str | None = None
+    is_last: bool | None = None
     items: List[DnItemCreateSchema] | None = None
 
 
