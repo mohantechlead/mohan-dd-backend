@@ -187,6 +187,7 @@ class OrderItem(models.Model):
     total_price = models.DecimalField(max_digits=12, decimal_places=2)
     before_vat = models.DecimalField(max_digits=12, decimal_places=2, default=0)
     measurement = models.CharField(max_length=100)
+    country_of_origin = models.CharField(max_length=255, blank=True, null=True)
 
     def __str__(self):
         return f"{self.order.order_number} - {self.item_name}"

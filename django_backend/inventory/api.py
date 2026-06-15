@@ -138,6 +138,27 @@ def _order_aggregate_from_line_items(items) -> tuple[Decimal, float, float]:
     return pr_before_vat, qty_sum, qty_sum
 
 
+def _normalize_item_country_of_origin(value) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _order_item_to_schema(item: OrderItem) -> OrderItemSchema:
+    return OrderItemSchema(
+        order_no=item.order_no,
+        item_name=item.item_name,
+        hs_code=item.hs_code,
+        price=float(item.price),
+        quantity=item.quantity,
+        total_price=float(item.total_price),
+        before_vat=float(item.before_vat),
+        measurement=item.measurement,
+        country_of_origin=item.country_of_origin,
+    )
+
+
 def _next_m_series_number(values) -> str:
     """Next M#### after max existing M-prefixed value; default M1001 if none."""
     max_n = None
@@ -2000,6 +2021,9 @@ def create_order(request, payload: OrderCreateSchema):
             total_price=item.total_price,
             before_vat=item.total_price,
             measurement=item.measurement,
+            country_of_origin=_normalize_item_country_of_origin(
+                getattr(item, "country_of_origin", None)
+            ),
         )
         created_items.append(new_item)
 
@@ -2039,19 +2063,7 @@ def create_order(request, payload: OrderCreateSchema):
         "cancelled_by": order.cancelled_by.username if admin_view and order.cancelled_by else None,
         "cancelled_date": order.cancelled_date.isoformat() if admin_view and order.cancelled_date else None,
         "status_remark": order.status_remark if admin_view else None,
-        "items": [
-            OrderItemSchema(
-                order_no=i.order_no,
-                item_name=i.item_name,
-                hs_code=i.hs_code,
-                price=float(i.price),
-                quantity=i.quantity,
-                total_price=float(i.total_price),
-                before_vat=float(i.before_vat),
-                measurement=i.measurement,
-            )
-            for i in created_items
-        ],
+        "items": [_order_item_to_schema(i) for i in created_items],
     }
 
 
@@ -2097,19 +2109,7 @@ def list_orders(request):
                 cancelled_by=o.cancelled_by.username if admin_view and o.cancelled_by else None,
                 cancelled_date=o.cancelled_date.isoformat() if admin_view and o.cancelled_date else None,
                 status_remark=o.status_remark if admin_view else None,
-                items=[
-                    OrderItemSchema(
-                        order_no=i.order_no,
-                        item_name=i.item_name,
-                        hs_code=i.hs_code,
-                        price=float(i.price),
-                        quantity=i.quantity,
-                        total_price=float(i.total_price),
-                        before_vat=float(i.before_vat),
-                        measurement=i.measurement,
-                    )
-                    for i in o.items.all()
-                ],
+                items=[_order_item_to_schema(i) for i in o.items.all()],
             )
         )
     return result
@@ -2163,19 +2163,7 @@ def get_order_detail(request, order_number: str):
         cancelled_by=order.cancelled_by.username if admin_view and order.cancelled_by else None,
         cancelled_date=order.cancelled_date.isoformat() if admin_view and order.cancelled_date else None,
         status_remark=order.status_remark if admin_view else None,
-        items=[
-            OrderItemSchema(
-                order_no=i.order_no,
-                item_name=i.item_name,
-                hs_code=i.hs_code,
-                price=float(i.price),
-                quantity=i.quantity,
-                total_price=float(i.total_price),
-                before_vat=float(i.before_vat),
-                measurement=i.measurement,
-            )
-            for i in order.items.all()
-        ],
+        items=[_order_item_to_schema(i) for i in order.items.all()],
     )
 
 
@@ -2228,6 +2216,9 @@ def update_order(request, order_number: str, payload: OrderUpdateSchema):
                 total_price=item.total_price,
                 before_vat=item.total_price,
                 measurement=item.measurement,
+                country_of_origin=_normalize_item_country_of_origin(
+                    getattr(item, "country_of_origin", None)
+                ),
             )
 
     return OrderDetailSchema(
@@ -2264,19 +2255,7 @@ def update_order(request, order_number: str, payload: OrderUpdateSchema):
         cancelled_by=order.cancelled_by.username if order.cancelled_by else None,
         cancelled_date=order.cancelled_date.isoformat() if order.cancelled_date else None,
         status_remark=order.status_remark,
-        items=[
-            OrderItemSchema(
-                order_no=i.order_no,
-                item_name=i.item_name,
-                hs_code=i.hs_code,
-                price=float(i.price),
-                quantity=i.quantity,
-                total_price=float(i.total_price),
-                before_vat=float(i.before_vat),
-                measurement=i.measurement,
-            )
-            for i in order.items.all()
-        ],
+        items=[_order_item_to_schema(i) for i in order.items.all()],
     )
 
 @router.delete("/orders/{order_number}", auth=JWTAuth())
@@ -2335,19 +2314,7 @@ def approve_order(request, order_number: str, payload: OrderApproveSchema):
         cancelled_by=order.cancelled_by.username if order.cancelled_by else None,
         cancelled_date=order.cancelled_date.isoformat() if order.cancelled_date else None,
         status_remark=order.status_remark,
-        items=[
-            OrderItemSchema(
-                order_no=i.order_no,
-                item_name=i.item_name,
-                hs_code=i.hs_code,
-                price=float(i.price),
-                quantity=i.quantity,
-                total_price=float(i.total_price),
-                before_vat=float(i.before_vat),
-                measurement=i.measurement,
-            )
-            for i in order.items.all()
-        ],
+        items=[_order_item_to_schema(i) for i in order.items.all()],
     )
 
 
@@ -2414,19 +2381,7 @@ def update_order_status(request, order_number: str, payload: OrderStatusUpdateSc
         cancelled_by=order.cancelled_by.username if order.cancelled_by else None,
         cancelled_date=order.cancelled_date.isoformat() if order.cancelled_date else None,
         status_remark=order.status_remark,
-        items=[
-            OrderItemSchema(
-                order_no=i.order_no,
-                item_name=i.item_name,
-                hs_code=i.hs_code,
-                price=float(i.price),
-                quantity=i.quantity,
-                total_price=float(i.total_price),
-                before_vat=float(i.before_vat),
-                measurement=i.measurement,
-            )
-            for i in order.items.all()
-        ],
+        items=[_order_item_to_schema(i) for i in order.items.all()],
     )
 
 

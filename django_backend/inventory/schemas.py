@@ -294,6 +294,7 @@ class OrderItemCreateSchema(Schema):
     quantity: float
     total_price: float
     measurement: str
+    country_of_origin: Optional[str] = None
 
 
 class OrderCreateSchema(Schema):
@@ -327,6 +328,7 @@ class OrderItemSchema(Schema):
     total_price: float
     before_vat: float
     measurement: str
+    country_of_origin: Optional[str] = None
 
 
 class OrderDetailSchema(Schema):
