@@ -2669,6 +2669,104 @@ def list_purchases(request):
     return result
 
 
+def _normalize_item_name_for_match(name: str | None) -> str:
+    if not name:
+        return ""
+    return re.sub(r"\s+", " ", name.strip()).lower()
+
+
+def _match_order_item_for_invoice_line(order, item_name, item_id=None):
+    order_items = list(order.items.all())
+    name_norm = _normalize_item_name_for_match(item_name)
+    if name_norm:
+        for oi in order_items:
+            if _normalize_item_name_for_match(oi.item_name) == name_norm:
+                return oi
+    if item_id:
+        for oi in order_items:
+            if oi.item_id == item_id:
+                return oi
+    return None
+
+
+def _resolve_invoice_line_hscode(order, *, item_name, hscode=None, item_id=None):
+    existing = (hscode or "").strip()
+    if existing:
+        return existing
+    oi = _match_order_item_for_invoice_line(order, item_name, item_id)
+    if oi and (oi.hs_code or "").strip():
+        return oi.hs_code.strip()
+    if item_id:
+        cat = Items.objects.filter(item_id=item_id).first()
+        if cat and (cat.hscode or "").strip():
+            return cat.hscode.strip()
+    if item_name and item_name.strip():
+        cat = Items.objects.filter(item_name__iexact=item_name.strip()).first()
+        if cat and (cat.hscode or "").strip():
+            return cat.hscode.strip()
+    return ""
+
+
+def _shipping_invoice_item_to_schema(invoice_item, order):
+    resolved_hscode = _resolve_invoice_line_hscode(
+        order,
+        item_name=invoice_item.item_name,
+        hscode=invoice_item.hscode,
+        item_id=invoice_item.item_id,
+    )
+    return ShippingInvoiceItemSchema(
+        item_id=invoice_item.item_id,
+        item_name=invoice_item.item_name,
+        code=invoice_item.code,
+        notes=invoice_item.notes,
+        price=float(invoice_item.price),
+        quantity=invoice_item.quantity,
+        total_price=float(invoice_item.total_price),
+        measurement=invoice_item.measurement,
+        package=invoice_item.package,
+        drums=invoice_item.drums,
+        bags=invoice_item.bags,
+        net_weight=invoice_item.net_weight,
+        gross_weight=invoice_item.gross_weight,
+        hscode=resolved_hscode or None,
+        grade=invoice_item.grade,
+        brand=invoice_item.brand,
+        country_of_origin=invoice_item.country_of_origin,
+    )
+
+
+def _shipping_invoice_to_detail_schema(invoice: ShippingInvoice):
+    order = invoice.order
+    return ShippingInvoiceDetailSchema(
+        id=invoice.id,
+        order_number=order.order_number,
+        invoice_number=invoice.invoice_number,
+        invoice_date=invoice.invoice_date,
+        waybill_number=invoice.waybill_number,
+        ecd_no=invoice.ecd_no,
+        customer_order_number=invoice.customer_order_number,
+        container_number=invoice.container_number,
+        vessel=invoice.vessel,
+        freight_amount=float(invoice.freight_amount) if invoice.freight_amount is not None else None,
+        reference_no=invoice.reference_no,
+        total_bags=invoice.total_bags,
+        total_net_weight=invoice.total_net_weight,
+        total_gross_weight=invoice.total_gross_weight,
+        final_price=float(invoice.final_price) if invoice.final_price is not None else None,
+        invoice_remark=invoice.invoice_remark,
+        packing_list_remark=invoice.packing_list_remark,
+        waybill_remark=invoice.waybill_remark,
+        bill_of_lading_remark=invoice.bill_of_lading_remark,
+        bank=invoice.bank,
+        sr_no=invoice.sr_no,
+        authorized_by=invoice.authorized_by,
+        authorized_at=invoice.authorized_at.isoformat() if invoice.authorized_at else None,
+        items=[
+            _shipping_invoice_item_to_schema(i, order) for i in invoice.items.all()
+        ],
+    )
+
+
 @router.post("/shipping-invoices", response=ShippingInvoiceSummarySchema)
 def create_shipping_invoice(request, payload: ShippingInvoiceCreateSchema):
     # Prevent duplicate invoice numbers (case-insensitive)
@@ -2717,6 +2815,12 @@ def create_shipping_invoice(request, payload: ShippingInvoiceCreateSchema):
                 {"detail": "Each item can have either bags or drums, not both."},
                 status=400,
             )
+        resolved_hscode = _resolve_invoice_line_hscode(
+            order,
+            item_name=item.item_name,
+            hscode=getattr(item, "hscode", None),
+            item_id=getattr(item, "item_id", None),
+        )
         ShippingInvoiceItem.objects.create(
             id=uuid.uuid4(),
             invoice=invoice,
@@ -2733,7 +2837,7 @@ def create_shipping_invoice(request, payload: ShippingInvoiceCreateSchema):
             bags=item.bags,
             net_weight=item.net_weight,
             gross_weight=item.gross_weight,
-            hscode=getattr(item, "hscode", None),
+            hscode=resolved_hscode or None,
             grade=item.grade,
             brand=item.brand,
             country_of_origin=getattr(item, "country_of_origin", None),
@@ -2777,55 +2881,9 @@ def list_shipping_invoices(request, order_number: Optional[str] = None):
 @router.get("/shipping-invoices/{invoice_id}", response=ShippingInvoiceDetailSchema)
 def get_shipping_invoice_detail(request, invoice_id: uuid.UUID):
     invoice = get_object_or_404(
-        ShippingInvoice.objects.prefetch_related("items", "order"), id=invoice_id
+        ShippingInvoice.objects.prefetch_related("items", "order__items"), id=invoice_id
     )
-    return ShippingInvoiceDetailSchema(
-        id=invoice.id,
-        order_number=invoice.order.order_number,
-        invoice_number=invoice.invoice_number,
-        invoice_date=invoice.invoice_date,
-        waybill_number=invoice.waybill_number,
-        ecd_no=invoice.ecd_no,
-        customer_order_number=invoice.customer_order_number,
-        container_number=invoice.container_number,
-        vessel=invoice.vessel,
-        freight_amount=float(invoice.freight_amount) if invoice.freight_amount is not None else None,
-        reference_no=invoice.reference_no,
-        total_bags=invoice.total_bags,
-        total_net_weight=invoice.total_net_weight,
-        total_gross_weight=invoice.total_gross_weight,
-        final_price=float(invoice.final_price) if invoice.final_price is not None else None,
-        invoice_remark=invoice.invoice_remark,
-        packing_list_remark=invoice.packing_list_remark,
-        waybill_remark=invoice.waybill_remark,
-        bill_of_lading_remark=invoice.bill_of_lading_remark,
-        bank=invoice.bank,
-        sr_no=invoice.sr_no,
-        authorized_by=invoice.authorized_by,
-        authorized_at=invoice.authorized_at.isoformat() if invoice.authorized_at else None,
-        items=[
-            ShippingInvoiceItemSchema(
-                item_id=i.item_id,
-                item_name=i.item_name,
-                code=i.code,
-                notes=i.notes,
-                price=float(i.price),
-                quantity=i.quantity,
-                total_price=float(i.total_price),
-                measurement=i.measurement,
-                package=i.package,
-                drums=i.drums,
-                bags=i.bags,
-                net_weight=i.net_weight,
-                gross_weight=i.gross_weight,
-                hscode=i.hscode,
-                grade=i.grade,
-                brand=i.brand,
-                country_of_origin=i.country_of_origin,
-            )
-            for i in invoice.items.all()
-        ],
-    )
+    return _shipping_invoice_to_detail_schema(invoice)
 
 
 @router.put("/shipping-invoices/{invoice_id}", response=ShippingInvoiceDetailSchema)
@@ -2833,7 +2891,7 @@ def update_shipping_invoice(
     request, invoice_id: uuid.UUID, payload: ShippingInvoiceUpdateSchema
 ):
     invoice = get_object_or_404(
-        ShippingInvoice.objects.prefetch_related("items", "order"), id=invoice_id
+        ShippingInvoice.objects.prefetch_related("items", "order__items"), id=invoice_id
     )
 
     new_invoice_number = (payload.invoice_number or "").strip()
@@ -2887,6 +2945,12 @@ def update_shipping_invoice(
                 {"detail": "Each item can have either bags or drums, not both."},
                 status=400,
             )
+        resolved_hscode = _resolve_invoice_line_hscode(
+            invoice.order,
+            item_name=item.item_name,
+            hscode=getattr(item, "hscode", None),
+            item_id=getattr(item, "item_id", None),
+        )
         ShippingInvoiceItem.objects.create(
             id=uuid.uuid4(),
             invoice=invoice,
@@ -2903,7 +2967,7 @@ def update_shipping_invoice(
             bags=item.bags,
             net_weight=item.net_weight,
             gross_weight=item.gross_weight,
-            hscode=getattr(item, "hscode", None),
+            hscode=resolved_hscode or None,
             grade=item.grade,
             brand=item.brand,
             country_of_origin=getattr(item, "country_of_origin", None),
@@ -2911,59 +2975,13 @@ def update_shipping_invoice(
 
     invoice.refresh_from_db()
 
-    return ShippingInvoiceDetailSchema(
-        id=invoice.id,
-        order_number=invoice.order.order_number,
-        invoice_number=invoice.invoice_number,
-        invoice_date=invoice.invoice_date,
-        waybill_number=invoice.waybill_number,
-        ecd_no=invoice.ecd_no,
-        customer_order_number=invoice.customer_order_number,
-        container_number=invoice.container_number,
-        vessel=invoice.vessel,
-        freight_amount=float(invoice.freight_amount) if invoice.freight_amount is not None else None,
-        reference_no=invoice.reference_no,
-        total_bags=invoice.total_bags,
-        total_net_weight=invoice.total_net_weight,
-        total_gross_weight=invoice.total_gross_weight,
-        final_price=float(invoice.final_price) if invoice.final_price is not None else None,
-        invoice_remark=invoice.invoice_remark,
-        packing_list_remark=invoice.packing_list_remark,
-        waybill_remark=invoice.waybill_remark,
-        bill_of_lading_remark=invoice.bill_of_lading_remark,
-        bank=invoice.bank,
-        sr_no=invoice.sr_no,
-        authorized_by=invoice.authorized_by,
-        authorized_at=invoice.authorized_at.isoformat() if invoice.authorized_at else None,
-        items=[
-            ShippingInvoiceItemSchema(
-                item_id=i.item_id,
-                item_name=i.item_name,
-                code=i.code,
-                notes=i.notes,
-                price=float(i.price),
-                quantity=i.quantity,
-                total_price=float(i.total_price),
-                measurement=i.measurement,
-                package=i.package,
-                drums=i.drums,
-                bags=i.bags,
-                net_weight=i.net_weight,
-                gross_weight=i.gross_weight,
-                hscode=i.hscode,
-                grade=i.grade,
-                brand=i.brand,
-                country_of_origin=i.country_of_origin,
-            )
-            for i in invoice.items.all()
-        ],
-    )
+    return _shipping_invoice_to_detail_schema(invoice)
 
 
 @router.post("/shipping-invoices/{invoice_id}/authorize", response=ShippingInvoiceDetailSchema, auth=JWTAuth())
 def authorize_shipping_invoice(request, invoice_id: uuid.UUID):
     invoice = get_object_or_404(
-        ShippingInvoice.objects.prefetch_related("items", "order"), id=invoice_id
+        ShippingInvoice.objects.prefetch_related("items", "order__items"), id=invoice_id
     )
     authorized_by = getattr(request.user, "username", None) or str(request.user)
     invoice.authorized_by = authorized_by
@@ -3098,51 +3116,5 @@ def authorize_shipping_invoice(request, invoice_id: uuid.UUID):
     except Exception as e:
         logger.exception("Failed to send authorize notification email: %s", e)
 
-    return ShippingInvoiceDetailSchema(
-        id=invoice.id,
-        order_number=invoice.order.order_number,
-        invoice_number=invoice.invoice_number,
-        invoice_date=invoice.invoice_date,
-        waybill_number=invoice.waybill_number,
-        ecd_no=invoice.ecd_no,
-        customer_order_number=invoice.customer_order_number,
-        container_number=invoice.container_number,
-        vessel=invoice.vessel,
-        freight_amount=float(invoice.freight_amount) if invoice.freight_amount is not None else None,
-        reference_no=invoice.reference_no,
-        total_bags=invoice.total_bags,
-        total_net_weight=invoice.total_net_weight,
-        total_gross_weight=invoice.total_gross_weight,
-        final_price=float(invoice.final_price) if invoice.final_price is not None else None,
-        invoice_remark=invoice.invoice_remark,
-        packing_list_remark=invoice.packing_list_remark,
-        waybill_remark=invoice.waybill_remark,
-        bill_of_lading_remark=invoice.bill_of_lading_remark,
-        bank=invoice.bank,
-        sr_no=invoice.sr_no,
-        authorized_by=invoice.authorized_by,
-        authorized_at=invoice.authorized_at.isoformat() if invoice.authorized_at else None,
-        items=[
-            ShippingInvoiceItemSchema(
-                item_id=i.item_id,
-                item_name=i.item_name,
-                code=i.code,
-                notes=i.notes,
-                price=float(i.price),
-                quantity=i.quantity,
-                total_price=float(i.total_price),
-                measurement=i.measurement,
-                package=i.package,
-                drums=i.drums,
-                bags=i.bags,
-                net_weight=i.net_weight,
-                gross_weight=i.gross_weight,
-                hscode=i.hscode,
-                grade=i.grade,
-                brand=i.brand,
-                country_of_origin=i.country_of_origin,
-            )
-            for i in invoice.items.all()
-        ],
-    )
+    return _shipping_invoice_to_detail_schema(invoice)
 
