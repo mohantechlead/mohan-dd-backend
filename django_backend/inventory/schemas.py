@@ -36,6 +36,7 @@ class GrnCreateSchema(Schema):
     ECD_no: str = ""
     transporter_name: str = ""
     remark: Optional[str] = None
+    is_last: bool = False
     items: List[GrnItemCreateSchema]
 
 # Response schema
@@ -47,6 +48,55 @@ class GrnItemSchema(Schema):
     unit_measurement: Optional[str] = None
     internal_code: Optional[str] = None
     bags: Optional[float] = None
+
+
+class OverUnderItemSchema(Schema):
+    item_name: str
+    invoiced: float
+    delivered: float
+    variance: float
+    unit: Optional[str] = None
+
+
+class GrnPurchaseItemSchema(Schema):
+    item_name: str
+    quantity: float
+    measurement: Optional[str] = None
+    code: Optional[str] = None
+
+
+class GrnPerGrnReceiptSchema(Schema):
+    grn_no: str
+    quantity: float
+    unit_measurement: Optional[str] = None
+    is_current: Optional[bool] = False
+
+
+class GrnReceiptComparisonSchema(Schema):
+    item_name: str
+    ordered_quantity: float
+    ordered_unit: Optional[str] = None
+    received_total: float
+    this_grn_quantity: float
+    this_grn_unit: Optional[str] = None
+    comparison_unit: Optional[str] = None
+    variance: float
+    per_grn_receipts: Optional[List[GrnPerGrnReceiptSchema]] = None
+
+
+class GrnRelatedItemSchema(Schema):
+    item_name: str
+    quantity: float
+    unit_measurement: Optional[str] = None
+    code: Optional[str] = None
+
+
+class GrnRelatedSchema(Schema):
+    grn_no: str
+    date: Optional[str] = None
+    is_last: Optional[bool] = False
+    is_current: Optional[bool] = False
+    items: List[GrnRelatedItemSchema] = []
 
 
 class GrnDetailSchema(Schema):
@@ -66,7 +116,13 @@ class GrnDetailSchema(Schema):
     ECD_no: Optional[str] = None
     transporter_name: Optional[str] = None
     remark: Optional[str] = None
+    is_last: Optional[bool] = False
     items: List[GrnItemSchema]
+    purchase_items: Optional[List[GrnPurchaseItemSchema]] = None
+    receipt_comparison: Optional[List[GrnReceiptComparisonSchema]] = None
+    related_grns: Optional[List[GrnRelatedSchema]] = None
+    over_items: Optional[List[OverUnderItemSchema]] = None
+    under_items: Optional[List[OverUnderItemSchema]] = None
 
 
 class GrnUpdateSchema(Schema):
@@ -85,6 +141,7 @@ class GrnUpdateSchema(Schema):
     ECD_no: str | None = None
     transporter_name: str | None = None
     remark: str | None = None
+    is_last: bool | None = None
     items: List[GrnItemCreateSchema] | None = None
 
 
@@ -139,14 +196,6 @@ class DnItemSchema(Schema):
     unit_measurement: Optional[str] = None
     internal_code: Optional[str] = None
     bags: Optional[float] = None
-
-
-class OverUnderItemSchema(Schema):
-    item_name: str
-    invoiced: float
-    delivered: float
-    variance: float
-    unit: Optional[str] = None
 
 
 class DnInvoiceItemSchema(Schema):

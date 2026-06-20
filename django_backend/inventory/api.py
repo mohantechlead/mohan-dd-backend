@@ -1297,6 +1297,306 @@ def _sync_git_rows_for_grn(grn: GRN, previous_qty_by_key: dict[str, float] | Non
         )
 
 
+def _apply_grn_is_last_flag(grn, is_last: bool):
+    """Persist is_last and ensure only one final GRN per purchase when marked last."""
+    grn.is_last = bool(is_last)
+    if grn.is_last:
+        purchase_no = (grn.purchase_no or "").strip()
+        if purchase_no:
+            GRN.objects.filter(
+                purchase_no__iexact=purchase_no,
+            ).exclude(pk=grn.pk).update(is_last=False)
+
+
+def _resolve_purchase_for_grn(grn):
+    purchase_no = (grn.purchase_no or "").strip()
+    if not purchase_no:
+        return None
+    return (
+        Purchase.objects.filter(purchase_number__iexact=purchase_no)
+        .prefetch_related("items")
+        .first()
+    )
+
+
+def _get_related_grns_for_purchase(grn):
+    """All GRNs on the same purchase as the given GRN."""
+    purchase_no = (grn.purchase_no or "").strip()
+    if not purchase_no:
+        return []
+    related_qs = (
+        GRN.objects.filter(purchase_no__iexact=purchase_no)
+        .prefetch_related("items")
+        .order_by("date", "grn_no")
+    )
+    return [
+        {
+            "grn_no": str(related.grn_no),
+            "date": related.date.isoformat() if related.date else None,
+            "is_last": bool(related.is_last),
+            "is_current": related.pk == grn.pk,
+            "items": [
+                {
+                    "item_name": line.item_name,
+                    "quantity": float(line.quantity or 0),
+                    "unit_measurement": line.unit_measurement,
+                    "code": line.code,
+                }
+                for line in related.items.all()
+            ],
+        }
+        for related in related_qs
+    ]
+
+
+def _get_grn_purchase_items(grn):
+    purchase = _resolve_purchase_for_grn(grn)
+    if not purchase:
+        return []
+    return [
+        {
+            "item_name": p.item_name,
+            "quantity": float(p.quantity or 0),
+            "measurement": p.measurement or "",
+            "code": p.hscode,
+        }
+        for p in purchase.items.all()
+    ]
+
+
+def _get_grn_receipt_comparison(grn):
+    """
+    Purchase order vs received summary per line item.
+    KG GRN lines are ÷ 1000 when compared to MT purchase quantities.
+    """
+    comparison = []
+    try:
+        purchase = _resolve_purchase_for_grn(grn)
+        if not purchase:
+            return comparison
+
+        ordered_by_item: dict[str, dict] = {}
+        for po_item in purchase.items.all():
+            name = po_item.item_name
+            bucket = ordered_by_item.setdefault(
+                name,
+                {"qty": 0.0, "unit": po_item.measurement or ""},
+            )
+            bucket["qty"] += float(po_item.quantity or 0)
+            if not bucket["unit"] and po_item.measurement:
+                bucket["unit"] = po_item.measurement
+
+        this_grn_by_item: dict[str, dict] = {}
+        for grn_line in grn.items.all():
+            bucket = this_grn_by_item.setdefault(
+                grn_line.item_name,
+                {"qty": 0.0, "unit": grn_line.unit_measurement or ""},
+            )
+            bucket["qty"] += float(grn_line.quantity or 0)
+            if not bucket["unit"] and grn_line.unit_measurement:
+                bucket["unit"] = grn_line.unit_measurement
+
+        purchase_no = (grn.purchase_no or "").strip()
+        related_grns = list(
+            GRN.objects.filter(purchase_no__iexact=purchase_no)
+            .prefetch_related("items")
+            .order_by("date", "grn_no")
+        ) if purchase_no else []
+
+        for item_name, po_data in ordered_by_item.items():
+            order_unit = po_data["unit"]
+            ordered_raw = float(po_data["qty"])
+            total_ordered = _quantity_to_mt(ordered_raw, order_unit)
+
+            grn_line_qs = GrnItems.objects.filter(
+                grn__purchase_no__iexact=purchase_no,
+                item_name=item_name,
+            )
+            received_units = []
+            total_received = 0.0
+            for grn_line in grn_line_qs:
+                grn_unit = grn_line.unit_measurement or ""
+                received_units.append(grn_unit)
+                total_received += _quantity_to_mt(
+                    grn_line.quantity or 0,
+                    grn_unit,
+                )
+
+            this_grn = this_grn_by_item.get(item_name, {"qty": 0.0, "unit": ""})
+            unit_label = _comparison_unit_label(order_unit, received_units)
+
+            per_grn_receipts = []
+            for related in related_grns:
+                line_qty = 0.0
+                line_unit = ""
+                for grn_line in related.items.all():
+                    if grn_line.item_name != item_name:
+                        continue
+                    line_qty += float(grn_line.quantity or 0)
+                    if not line_unit and grn_line.unit_measurement:
+                        line_unit = grn_line.unit_measurement or ""
+                per_grn_receipts.append({
+                    "grn_no": str(related.grn_no),
+                    "quantity": round(line_qty, 6),
+                    "unit_measurement": line_unit or None,
+                    "is_current": related.pk == grn.pk,
+                })
+
+            comparison.append({
+                "item_name": item_name,
+                "ordered_quantity": round(ordered_raw, 6),
+                "ordered_unit": order_unit or None,
+                "received_total": round(total_received, 6),
+                "this_grn_quantity": round(float(this_grn["qty"]), 6),
+                "this_grn_unit": this_grn["unit"] or None,
+                "comparison_unit": unit_label,
+                "variance": round(total_received - total_ordered, 6),
+                "per_grn_receipts": per_grn_receipts,
+            })
+    except Exception as e:
+        logger.exception("GRN receipt comparison compute failed: %s", e)
+    return comparison
+
+
+def _get_over_under_receipt(grn):
+    """Compute over/under receipt variances vs purchase order."""
+    over_items = []
+    under_items = []
+    tolerance = 1e-6
+    try:
+        for row in _get_grn_receipt_comparison(grn):
+            ordered_cmp = _quantity_to_mt(
+                row["ordered_quantity"],
+                row.get("ordered_unit"),
+            )
+            received = row["received_total"]
+            unit_label = row.get("comparison_unit")
+
+            if received > ordered_cmp + tolerance:
+                variance = received - ordered_cmp
+                over_items.append({
+                    "item_name": row["item_name"],
+                    "invoiced": round(ordered_cmp, 6),
+                    "delivered": round(received, 6),
+                    "variance": round(variance, 6),
+                    "unit": unit_label,
+                })
+            elif received < ordered_cmp - tolerance:
+                variance = ordered_cmp - received
+                under_items.append({
+                    "item_name": row["item_name"],
+                    "invoiced": round(ordered_cmp, 6),
+                    "delivered": round(received, 6),
+                    "variance": round(variance, 6),
+                    "unit": unit_label,
+                })
+    except Exception as e:
+        logger.exception("Over/under receipt compute failed: %s", e)
+    return over_items, under_items
+
+
+def _check_and_notify_over_under_receipt(grn):
+    """Compare total received vs purchase across all GRNs; send email if variances exist."""
+    over_items, under_items = _get_over_under_receipt(grn)
+    if not over_items and not under_items:
+        return over_items, under_items
+
+    recipient_list = getattr(settings, "NOTIFICATION_EMAIL_RECIPIENTS", [])
+    if not recipient_list:
+        logger.warning(
+            "Over/under receipt notification skipped: no NOTIFICATION_EMAIL_RECIPIENTS"
+        )
+        return over_items, under_items
+
+    try:
+        purchase_no = (grn.purchase_no or "").strip() or "—"
+        grn_date_str = grn.date.strftime("%Y-%m-%d") if grn.date else "—"
+        variance_count = len(over_items) + len(under_items)
+
+        def _esc(s):
+            return html.escape(str(s) if s is not None else "")
+
+        def _plain_variance_section(title, items, variance_label):
+            if not items:
+                return []
+            section = [title]
+            for it in items:
+                unit = it.get("unit")
+                unit_suffix = f" {unit}" if unit else ""
+                section.append(
+                    f"  - {it['item_name']}: ordered={it['invoiced']}{unit_suffix}, "
+                    f"received={it['delivered']}{unit_suffix} "
+                    f"({variance_label} {it['variance']}{unit_suffix})"
+                )
+            section.append("")
+            return section
+
+        plain_lines = [
+            "OVER/UNDER RECEIPT NOTIFICATION",
+            "=" * 40,
+            "",
+            "Total received quantities for this purchase (all GRNs) do not match the purchase order.",
+            "",
+            "RECEIPT DETAILS",
+            f"  GRN:                  {grn.grn_no}",
+            f"  Purchase No:          {purchase_no}",
+            f"  Supplier:             {grn.supplier_name}",
+            f"  GRN Date:             {grn_date_str}",
+            "",
+        ]
+        plain_lines.extend(_plain_variance_section("OVER RECEIPT:", over_items, "over by"))
+        plain_lines.extend(_plain_variance_section("UNDER RECEIPT:", under_items, "short by"))
+        plain_message = "\n".join(plain_lines).rstrip() + "\n"
+
+        subject = f"Over/Under Receipt – GRN {grn.grn_no} – Purchase {purchase_no}"
+
+        sent = _send_notification_mail(
+            subject=subject,
+            message=plain_message,
+            recipient_list=recipient_list,
+        )
+        if sent > 0:
+            logger.info("Over/under receipt notification sent to %s", recipient_list)
+    except Exception as e:
+        logger.exception("Failed to send over/under receipt notification: %s", e)
+
+    return over_items, under_items
+
+
+def _maybe_notify_over_under_receipt(grn):
+    """Send over/under email only when this GRN is marked as the final receipt for its purchase."""
+    if not grn.is_last:
+        return [], []
+    return _check_and_notify_over_under_receipt(grn)
+
+
+def _enrich_grn_detail(grn):
+    """Attach purchase comparison and related GRNs for list/detail views."""
+    result = _grn_to_detail(grn)
+    purchase_no = (grn.purchase_no or "").strip()
+    if not purchase_no:
+        return result
+
+    related = _get_related_grns_for_purchase(grn)
+    if related:
+        result["related_grns"] = related
+
+    purchase_items = _get_grn_purchase_items(grn)
+    if purchase_items:
+        result["purchase_items"] = purchase_items
+
+    receipt_comparison = _get_grn_receipt_comparison(grn)
+    if receipt_comparison:
+        result["receipt_comparison"] = receipt_comparison
+
+    over_items, under_items = _get_over_under_receipt(grn)
+    if over_items:
+        result["over_items"] = over_items
+    if under_items:
+        result["under_items"] = under_items
+    return result
+
+
 @router.post("/grn", response=GrnDetailSchema)
 def create_grn(request, payload: GrnCreateSchema):
     try:
@@ -1346,6 +1646,7 @@ def create_grn(request, payload: GrnCreateSchema):
             ECD_no=payload.ECD_no,
             transporter_name=payload.transporter_name,
             remark=(payload.remark or "").strip() or None,
+            is_last=bool(payload.is_last),
         )
 
         created_items = []
@@ -1364,10 +1665,12 @@ def create_grn(request, payload: GrnCreateSchema):
             created_items.append(new_item)
 
         _sync_git_rows_for_grn(grn)
+        _apply_grn_is_last_flag(grn, grn.is_last)
         _check_and_notify_negative_stock(trigger_grn=grn)
+        _maybe_notify_over_under_receipt(grn)
 
         grn.refresh_from_db()
-        return _grn_to_detail(grn)
+        return _enrich_grn_detail(grn)
     except ValueError as e:
         return JsonResponse({"detail": str(e)}, status=400)
     except Exception as e:
@@ -1378,39 +1681,11 @@ def create_grn(request, payload: GrnCreateSchema):
         )
 
 
-@router.get("/grn", response=List[GRNListSchema])
+@router.get("/grn", response=List[GrnDetailSchema])
 def list_GRN(request):
     try:
         grns = GRN.objects.prefetch_related("items").all()
-        result = []
-        for grn in grns:
-            result.append(
-                GRNListSchema(
-                    supplier_name=grn.supplier_name,
-                    grn_no=grn.grn_no,
-                    date=grn.date.isoformat() if grn.date else None,
-                    purchase_no=grn.purchase_no,
-                    received_from=grn.received_from,
-                    truck_no=grn.truck_no,
-                    total_quantity=grn.total_quantity,
-                    store_name=grn.store_name,
-                    store_keeper=grn.store_keeper,
-                    remark=grn.remark,
-                    items=[
-                        GrnItemSchema(
-                            grn_no=item.grn_no,
-                            code=item.code,
-                            item_name=item.item_name,
-                            quantity=item.quantity,
-                            unit_measurement=item.unit_measurement,
-                            internal_code=item.internal_code,
-                            bags=float(item.bags) if item.bags is not None else None,
-                        )
-                        for item in grn.items.all()
-                    ]
-                )
-            )
-        return result
+        return [_enrich_grn_detail(grn) for grn in grns]
     except Exception as e:
         print("GRN endpoint error:", e)
         traceback.print_exc()
@@ -1421,8 +1696,8 @@ def list_GRN(request):
 
 @router.get("/grn/{grn_no}", response=GrnDetailSchema)
 def get_GRN(request, grn_no: str):
-    grn = get_object_or_404(GRN, grn_no=int(grn_no) if grn_no.isdigit() else grn_no)
-    return _grn_to_detail(grn)
+    grn = get_object_or_404(GRN.objects.prefetch_related("items"), grn_no=int(grn_no) if grn_no.isdigit() else grn_no)
+    return _enrich_grn_detail(grn)
 
 
 @router.put("/grn/{grn_no}", response=GrnDetailSchema, auth=JWTAuth())
@@ -1459,6 +1734,8 @@ def update_GRN(request, grn_no: str, payload: GrnUpdateSchema):
         grn.transporter_name = payload.transporter_name
     if payload.remark is not None:
         grn.remark = (payload.remark or "").strip() or None
+    if payload.is_last is not None:
+        _apply_grn_is_last_flag(grn, payload.is_last)
     previous_qty_by_key = (
         {k: float(v["qty"]) for k, v in _grn_qty_map(grn).items()} if payload.items is not None else None
     )
@@ -1491,7 +1768,14 @@ def update_GRN(request, grn_no: str, payload: GrnUpdateSchema):
     _sync_git_rows_for_grn(grn, previous_qty_by_key)
     if payload.items is not None:
         _check_and_notify_negative_stock(trigger_grn=grn)
-    return _grn_to_detail(grn)
+    over_items, under_items = _maybe_notify_over_under_receipt(grn)
+
+    result = _grn_to_detail(grn)
+    if over_items:
+        result["over_items"] = over_items
+    if under_items:
+        result["under_items"] = under_items
+    return result
 
 
 @router.delete("/grn/{grn_no}", auth=JWTAuth())
@@ -1521,6 +1805,7 @@ def _grn_to_detail(grn):
         "ECD_no": grn.ECD_no,
         "transporter_name": grn.transporter_name,
         "remark": grn.remark,
+        "is_last": bool(grn.is_last),
         "items": [
             {
                 "grn_no": item.grn_no,

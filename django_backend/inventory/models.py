@@ -21,6 +21,8 @@ class GRN(models.Model):
     ECD_no = models.CharField(max_length=255, blank=True, null=True)
     transporter_name = models.CharField(max_length=255, blank=True, null=True)
     remark = models.TextField(blank=True, null=True)
+    # When True, over/under receipt is evaluated across all GRNs for this purchase.
+    is_last = models.BooleanField(default=False)
 
     def __str__(self):
         return f"{self.grn_no} ({self.supplier_name})"
