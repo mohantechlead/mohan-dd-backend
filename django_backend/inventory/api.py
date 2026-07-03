@@ -705,6 +705,10 @@ def _enrich_dn_detail(dn):
         result["over_items"] = over_items
     if under_items:
         result["under_items"] = under_items
+
+    negative_items = _get_negative_stock_for_trigger(trigger_dn=dn)
+    if negative_items:
+        result["negative_items"] = negative_items
     return result
 
 
@@ -876,8 +880,8 @@ def _negative_stock_trigger_context(trigger_dn=None, trigger_grn=None):
     return dn_no, grn_no, transaction_date
 
 
-def _check_and_notify_negative_stock(*, trigger_dn=None, trigger_grn=None):
-    """Check if any item has negative stock and send email notification if so."""
+def _collect_all_negative_stock_items():
+    """Return every catalog code whose aggregated stock quantity or package is below zero."""
     negative_items = []
     for row in _build_stock_by_code():
         stock_quantity = float(row.get("quantity") or 0)
@@ -891,6 +895,62 @@ def _check_and_notify_negative_stock(*, trigger_dn=None, trigger_grn=None):
                 "grn_nos": row.get("grn_nos") or [],
                 "dn_nos": row.get("dn_nos") or [],
             })
+    return negative_items
+
+
+def _collect_trigger_stock_codes(*, trigger_dn=None, trigger_grn=None):
+    """Business codes on the DN/GRN lines that triggered a stock check."""
+    codes = set()
+    if trigger_dn:
+        for item in trigger_dn.dn_items.all():
+            for code in (item.code, item.internal_code):
+                if code and str(code).strip():
+                    codes.add(str(code).strip())
+    elif trigger_grn:
+        for item in trigger_grn.items.all():
+            for code in (item.code, item.internal_code):
+                if code and str(code).strip():
+                    codes.add(str(code).strip())
+    return codes
+
+
+def _filter_negative_items_for_trigger(negative_items, *, trigger_dn=None, trigger_grn=None):
+    """Keep only negative stock rows tied to the DN/GRN that triggered the check."""
+    if not trigger_dn and not trigger_grn:
+        return negative_items
+
+    trigger_codes = _collect_trigger_stock_codes(
+        trigger_dn=trigger_dn, trigger_grn=trigger_grn
+    )
+    doc_no = str(trigger_dn.dn_no) if trigger_dn else str(trigger_grn.grn_no)
+    doc_key = "dn_nos" if trigger_dn else "grn_nos"
+
+    filtered = []
+    for item in negative_items:
+        if doc_no in (item.get(doc_key) or []):
+            filtered.append(item)
+            continue
+        code = (item.get("internal_code") or item.get("code") or "").strip()
+        if code in trigger_codes:
+            filtered.append(item)
+    return filtered
+
+
+def _get_negative_stock_for_trigger(*, trigger_dn=None, trigger_grn=None):
+    """Negative stock rows affected by the given DN or GRN."""
+    return _filter_negative_items_for_trigger(
+        _collect_all_negative_stock_items(),
+        trigger_dn=trigger_dn,
+        trigger_grn=trigger_grn,
+    )
+
+
+def _check_and_notify_negative_stock(*, trigger_dn=None, trigger_grn=None):
+    """Check if items on the triggering DN/GRN have negative stock and email if so."""
+    negative_items = _get_negative_stock_for_trigger(
+        trigger_dn=trigger_dn,
+        trigger_grn=trigger_grn,
+    )
 
     if not negative_items:
         return
@@ -916,7 +976,7 @@ def _check_and_notify_negative_stock(*, trigger_dn=None, trigger_grn=None):
         plain_message = (
             f"NEGATIVE STOCK ALERT\n"
             f"{'=' * 40}\n\n"
-            f"One or more inventory items are below zero after a stock movement.\n\n"
+            f"One or more items on this transaction now have negative stock.\n\n"
             f"TRANSACTION THAT TRIGGERED ALERT\n"
             f"  DN Number:            {dn_no}\n"
             f"  GRN Number:           {grn_no}\n"
@@ -951,7 +1011,7 @@ def _check_and_notify_negative_stock(*, trigger_dn=None, trigger_grn=None):
     </div>
     <div style="padding:24px;">
       <p style="margin:0 0 16px;color:#374151;font-size:15px;line-height:1.5;">
-        One or more inventory items are below zero after a stock movement. Review the transaction below and adjust stock or documents as needed.
+        One or more items on this transaction now have negative stock. Review the transaction below and adjust stock or documents as needed.
       </p>
       <table style="width:100%;border-collapse:collapse;margin-bottom:20px;font-size:14px;">
         <tr><td style="padding:6px 0;color:#6b7280;width:45%;">DN Number</td><td style="padding:6px 0;color:#111827;font-weight:500;">{_esc(dn_no)}</td></tr>
@@ -1594,6 +1654,10 @@ def _enrich_grn_detail(grn):
         result["over_items"] = over_items
     if under_items:
         result["under_items"] = under_items
+
+    negative_items = _get_negative_stock_for_trigger(trigger_grn=grn)
+    if negative_items:
+        result["negative_items"] = negative_items
     return result
 
 
@@ -1775,6 +1839,10 @@ def update_GRN(request, grn_no: str, payload: GrnUpdateSchema):
         result["over_items"] = over_items
     if under_items:
         result["under_items"] = under_items
+    if payload.items is not None:
+        negative_items = _get_negative_stock_for_trigger(trigger_grn=grn)
+        if negative_items:
+            result["negative_items"] = negative_items
     return result
 
 
@@ -1986,6 +2054,9 @@ def update_DN(request, dn_no: str, payload: DnUpdateSchema):
         result["over_items"] = over_items
     if under_items:
         result["under_items"] = under_items
+    negative_items = _get_negative_stock_for_trigger(trigger_dn=dn)
+    if negative_items:
+        result["negative_items"] = negative_items
     return result
 
 

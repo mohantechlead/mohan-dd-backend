@@ -58,6 +58,13 @@ class OverUnderItemSchema(Schema):
     unit: Optional[str] = None
 
 
+class NegativeStockItemSchema(Schema):
+    item_name: str
+    internal_code: Optional[str] = None
+    quantity: float
+    package: float
+
+
 class GrnPurchaseItemSchema(Schema):
     item_name: str
     quantity: float
@@ -123,6 +130,7 @@ class GrnDetailSchema(Schema):
     related_grns: Optional[List[GrnRelatedSchema]] = None
     over_items: Optional[List[OverUnderItemSchema]] = None
     under_items: Optional[List[OverUnderItemSchema]] = None
+    negative_items: Optional[List[NegativeStockItemSchema]] = None
 
 
 class GrnUpdateSchema(Schema):
@@ -260,6 +268,7 @@ class DnDetailSchema(Schema):
     related_dns: Optional[List[DnRelatedSchema]] = None
     over_items: Optional[List[OverUnderItemSchema]] = None
     under_items: Optional[List[OverUnderItemSchema]] = None
+    negative_items: Optional[List[NegativeStockItemSchema]] = None
 
 
 class DnUpdateSchema(Schema):
