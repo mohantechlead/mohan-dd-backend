@@ -1,8 +1,17 @@
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from django.test import TestCase
 
-from inventory.api import _filter_negative_items_for_trigger
+from inventory.api import (
+    _comparison_unit_label,
+    _comparison_variance_tolerance,
+    _filter_negative_items_for_trigger,
+    _maybe_notify_negative_stock,
+    _quantity_for_comparison,
+    _round_comparison_qty,
+    _sum_movement_lines_for_comparison,
+    _units_comparable_for_variance,
+)
 
 
 class NegativeStockFilterTests(TestCase):
@@ -65,3 +74,59 @@ class NegativeStockFilterTests(TestCase):
 
         self.assertEqual(len(filtered), 1)
         self.assertEqual(filtered[0]["internal_code"], "ZNO-99")
+
+
+class UnitComparisonTests(TestCase):
+    def test_mt_purchase_converts_kg_grn_to_mt(self):
+        self.assertEqual(_quantity_for_comparison(37000, "KG", "MT"), 37.0)
+        self.assertEqual(_comparison_unit_label("MT", ["KG"]), "MT")
+        self.assertTrue(_units_comparable_for_variance("MT", ["KG"]))
+
+    def test_pc_purchase_keeps_kg_grn_as_kg(self):
+        self.assertEqual(_quantity_for_comparison(2060, "KG", "PCs"), 2060.0)
+        self.assertEqual(_comparison_unit_label("PCs", ["KG"]), "KG")
+        self.assertFalse(_units_comparable_for_variance("PCs", ["KG"]))
+
+    def test_same_non_mass_units_are_comparable(self):
+        self.assertEqual(_quantity_for_comparison(75, "PCs", "PCs"), 75.0)
+        self.assertEqual(_comparison_unit_label("PCs", ["PCs"]), "PCS")
+        self.assertTrue(_units_comparable_for_variance("PCs", ["PCs"]))
+
+
+class MaybeNotifyNegativeStockTests(TestCase):
+    @patch("inventory.api._check_and_notify_negative_stock")
+    def test_skips_grn_email_when_not_last(self, mock_notify):
+        grn = MagicMock()
+        grn.is_last = False
+        _maybe_notify_negative_stock(trigger_grn=grn)
+        mock_notify.assert_not_called()
+
+    @patch("inventory.api._check_and_notify_negative_stock")
+    def test_sends_grn_email_when_last(self, mock_notify):
+        grn = MagicMock()
+        grn.is_last = True
+        _maybe_notify_negative_stock(trigger_grn=grn)
+        mock_notify.assert_called_once_with(trigger_dn=None, trigger_grn=grn)
+
+
+class MovementComparisonTests(TestCase):
+    def test_sums_kg_before_converting_to_mt(self):
+        lines = [
+            MagicMock(quantity=6675, unit_measurement="KG"),
+            MagicMock(quantity=6675, unit_measurement="KG"),
+            MagicMock(quantity=6650, unit_measurement="KG"),
+        ]
+        total = _sum_movement_lines_for_comparison(lines, "MT")
+        self.assertEqual(total, 20.0)
+        self.assertEqual(_round_comparison_qty(total, "MT"), 20.0)
+
+    def test_mt_variance_tolerance_is_one_kg(self):
+        self.assertEqual(_comparison_variance_tolerance("MT"), 0.001)
+        self.assertGreater(0.025, _comparison_variance_tolerance("MT"))
+
+    def test_normalize_comparison_variance_zeros_within_tolerance(self):
+        from inventory.api import _normalize_comparison_variance
+
+        self.assertEqual(_normalize_comparison_variance(0.0008, "MT"), 0.0)
+        self.assertEqual(_normalize_comparison_variance(-0.001, "MT"), 0.0)
+        self.assertEqual(_normalize_comparison_variance(0.025, "MT"), 0.025)

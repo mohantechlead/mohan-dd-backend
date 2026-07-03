@@ -447,13 +447,92 @@ def _quantity_to_mt(quantity, unit) -> float:
     return qty
 
 
-def _comparison_unit_label(invoice_unit, delivered_units) -> str:
-    units = [_normalize_mass_unit(invoice_unit), *map(_normalize_mass_unit, delivered_units)]
-    if any(_is_kg_mass_unit(u) for u in units):
+def _quantity_for_comparison(quantity, unit, reference_unit) -> float:
+    """Convert a movement quantity for comparison against invoice/purchase unit.
+
+    KG is divided by 1000 only when the reference document is in MT.
+    """
+    qty = float(quantity or 0)
+    if _is_mt_mass_unit(reference_unit) and _is_kg_mass_unit(unit):
+        return qty / 1000.0
+    return qty
+
+
+def _comparison_unit_label(reference_unit, movement_units) -> str:
+    """Unit label for total received/delivered and variance columns."""
+    if _is_mt_mass_unit(reference_unit):
         return "MT"
-    if any(_is_mt_mass_unit(u) for u in units):
-        return "MT"
-    return _normalize_mass_unit(invoice_unit) or "—"
+    for unit in movement_units:
+        if unit and str(unit).strip():
+            return _normalize_mass_unit(unit) or str(unit).strip()
+    return _normalize_mass_unit(reference_unit) or "—"
+
+
+def _units_comparable_for_variance(reference_unit, movement_units) -> bool:
+    """Whether ordered/invoiced qty can be compared to received/delivered totals."""
+    if _is_mt_mass_unit(reference_unit):
+        return all(
+            not (unit or "").strip()
+            or _is_kg_mass_unit(unit)
+            or _is_mt_mass_unit(unit)
+            for unit in movement_units
+        )
+    ref_norm = _normalize_mass_unit(reference_unit)
+    movement_norms = {
+        _normalize_mass_unit(unit)
+        for unit in movement_units
+        if (unit or "").strip()
+    }
+    if not movement_norms:
+        return True
+    return movement_norms == {ref_norm}
+
+
+def _comparison_variance_tolerance(reference_unit) -> float:
+    """Ignore tiny mass differences caused by unit conversion rounding (1 kg in MT)."""
+    if _is_mt_mass_unit(reference_unit):
+        return 0.001
+    return 1e-6
+
+
+def _round_comparison_qty(quantity, reference_unit) -> float:
+    if _is_mt_mass_unit(reference_unit):
+        return round(float(quantity or 0), 3)
+    return round(float(quantity or 0), 6)
+
+
+def _sum_movement_lines_for_comparison(lines, reference_unit) -> float:
+    """Sum movement line quantities in units comparable to reference_unit."""
+    if _is_mt_mass_unit(reference_unit):
+        kg_total = 0.0
+        mt_total = 0.0
+        for line in lines:
+            qty = float(line.quantity or 0)
+            unit = line.unit_measurement or ""
+            if _is_kg_mass_unit(unit):
+                kg_total += qty
+            else:
+                mt_total += _quantity_for_comparison(qty, unit, reference_unit)
+        return mt_total + kg_total / 1000.0
+
+    total = 0.0
+    for line in lines:
+        total += float(line.quantity or 0)
+    return total
+
+
+def _normalize_comparison_variance(variance, reference_unit):
+    """Treat tiny mass differences as zero so UI, alerts, and email stay aligned."""
+    if variance is None:
+        return None
+    tolerance = _comparison_variance_tolerance(reference_unit)
+    if abs(variance) <= tolerance:
+        return 0.0
+    return variance
+
+
+def _line_matches_item_name(line, item_name: str) -> bool:
+    return (line.item_name or "").strip().lower() == (item_name or "").strip().lower()
 
 
 def _apply_dn_is_last_flag(dn, is_last: bool):
@@ -701,14 +780,15 @@ def _enrich_dn_detail(dn):
         result["delivery_comparison"] = delivery_comparison
 
     over_items, under_items = _get_over_under_delivery(dn)
-    if over_items:
-        result["over_items"] = over_items
-    if under_items:
-        result["under_items"] = under_items
+    if dn.is_last:
+        if over_items:
+            result["over_items"] = over_items
+        if under_items:
+            result["under_items"] = under_items
 
-    negative_items = _get_negative_stock_for_trigger(trigger_dn=dn)
-    if negative_items:
-        result["negative_items"] = negative_items
+        negative_items = _get_negative_stock_for_trigger(trigger_dn=dn)
+        if negative_items:
+            result["negative_items"] = negative_items
     return result
 
 
@@ -730,7 +810,7 @@ def _get_dn_invoice_items(dn):
 def _get_dn_delivery_comparison(dn):
     """
     Invoiced vs delivered summary per invoice line item.
-    KG DN lines are ÷ 1000 when compared to MT invoice quantities.
+    KG DN lines are ÷ 1000 only when the invoice quantity is in MT.
     """
     comparison = []
     try:
@@ -772,34 +852,43 @@ def _get_dn_delivery_comparison(dn):
         for item_name, inv_data in invoiced_by_item.items():
             invoice_unit = inv_data["unit"]
             invoiced_raw = float(inv_data["qty"])
-            total_invoiced = _quantity_to_mt(invoiced_raw, invoice_unit)
 
             dn_line_qs = DNItems.objects.filter(
                 dn__sales_no=dn.sales_no,
-                item_name=item_name,
+                item_name__iexact=item_name,
             )
             if invoice_no:
                 dn_line_qs = dn_line_qs.filter(dn__invoice_no__iexact=invoice_no)
-            dn_lines = dn_line_qs
+            dn_lines = list(dn_line_qs)
             delivered_units = []
-            total_delivered = 0.0
             for dn_line in dn_lines:
-                dn_unit = dn_line.unit_measurement or ""
-                delivered_units.append(dn_unit)
-                total_delivered += _quantity_to_mt(
-                    dn_line.quantity or 0,
-                    dn_unit,
-                )
+                delivered_units.append(dn_line.unit_measurement or "")
+            total_delivered = _sum_movement_lines_for_comparison(dn_lines, invoice_unit)
 
             this_dn = this_dn_by_item.get(item_name, {"qty": 0.0, "unit": ""})
             unit_label = _comparison_unit_label(invoice_unit, delivered_units)
+            comparable = _units_comparable_for_variance(invoice_unit, delivered_units)
+            if comparable:
+                total_invoiced = _quantity_for_comparison(
+                    invoiced_raw,
+                    invoice_unit,
+                    invoice_unit,
+                )
+                total_invoiced = _round_comparison_qty(total_invoiced, invoice_unit)
+                total_delivered = _round_comparison_qty(total_delivered, invoice_unit)
+                variance = _normalize_comparison_variance(
+                    total_delivered - total_invoiced,
+                    invoice_unit,
+                )
+            else:
+                variance = None
 
             per_dn_deliveries = []
             for related in related_dns:
                 line_qty = 0.0
                 line_unit = ""
                 for dn_line in related.dn_items.all():
-                    if dn_line.item_name != item_name:
+                    if not _line_matches_item_name(dn_line, item_name):
                         continue
                     line_qty += float(dn_line.quantity or 0)
                     if not line_unit and dn_line.unit_measurement:
@@ -819,7 +908,7 @@ def _get_dn_delivery_comparison(dn):
                 "this_dn_quantity": round(float(this_dn["qty"]), 6),
                 "this_dn_unit": this_dn["unit"] or None,
                 "comparison_unit": unit_label,
-                "variance": round(total_delivered - total_invoiced, 6),
+                "variance": round(variance, 6) if variance is not None else None,
                 "per_dn_deliveries": per_dn_deliveries,
             })
     except Exception as e:
@@ -834,32 +923,39 @@ def _get_over_under_delivery(dn):
     """
     over_items = []
     under_items = []
-    tolerance = 1e-6
     try:
         for row in _get_dn_delivery_comparison(dn):
-            invoiced_cmp = _quantity_to_mt(
-                row["invoiced_quantity"],
+            variance = row.get("variance")
+            if variance is None:
+                continue
+            tolerance = _comparison_variance_tolerance(row.get("invoiced_unit"))
+            if abs(variance) <= tolerance:
+                continue
+            invoiced_cmp = _round_comparison_qty(
+                _quantity_for_comparison(
+                    row["invoiced_quantity"],
+                    row.get("invoiced_unit"),
+                    row.get("invoiced_unit"),
+                ),
                 row.get("invoiced_unit"),
             )
             delivered = row["delivered_total"]
             unit_label = row.get("comparison_unit")
 
-            if delivered > invoiced_cmp + tolerance:
-                variance = delivered - invoiced_cmp
+            if variance > 0:
                 over_items.append({
                     "item_name": row["item_name"],
-                    "invoiced": round(invoiced_cmp, 6),
-                    "delivered": round(delivered, 6),
+                    "invoiced": invoiced_cmp,
+                    "delivered": delivered,
                     "variance": round(variance, 6),
                     "unit": unit_label,
                 })
-            elif delivered < invoiced_cmp - tolerance:
-                variance = invoiced_cmp - delivered
+            else:
                 under_items.append({
                     "item_name": row["item_name"],
-                    "invoiced": round(invoiced_cmp, 6),
-                    "delivered": round(delivered, 6),
-                    "variance": round(variance, 6),
+                    "invoiced": invoiced_cmp,
+                    "delivered": delivered,
+                    "variance": round(abs(variance), 6),
                     "unit": unit_label,
                 })
     except Exception as e:
@@ -1058,6 +1154,15 @@ def _check_and_notify_negative_stock(*, trigger_dn=None, trigger_grn=None):
             logger.warning("Negative stock alert email sent count was 0")
     except Exception as e:
         logger.exception("Failed to send negative stock alert email: %s", e)
+
+
+def _maybe_notify_negative_stock(*, trigger_dn=None, trigger_grn=None):
+    """Send negative stock email only on the final DN/GRN for its invoice/purchase."""
+    if trigger_dn is not None and not trigger_dn.is_last:
+        return
+    if trigger_grn is not None and not trigger_grn.is_last:
+        return
+    _check_and_notify_negative_stock(trigger_dn=trigger_dn, trigger_grn=trigger_grn)
 
 
 def _validate_grn_items(items):
@@ -1427,7 +1532,7 @@ def _get_grn_purchase_items(grn):
 def _get_grn_receipt_comparison(grn):
     """
     Purchase order vs received summary per line item.
-    KG GRN lines are ÷ 1000 when compared to MT purchase quantities.
+    KG GRN lines are ÷ 1000 only when the purchase quantity is in MT.
     """
     comparison = []
     try:
@@ -1466,31 +1571,41 @@ def _get_grn_receipt_comparison(grn):
         for item_name, po_data in ordered_by_item.items():
             order_unit = po_data["unit"]
             ordered_raw = float(po_data["qty"])
-            total_ordered = _quantity_to_mt(ordered_raw, order_unit)
 
             grn_line_qs = GrnItems.objects.filter(
                 grn__purchase_no__iexact=purchase_no,
-                item_name=item_name,
+                item_name__iexact=item_name,
             )
+            grn_lines = list(grn_line_qs)
             received_units = []
-            total_received = 0.0
-            for grn_line in grn_line_qs:
-                grn_unit = grn_line.unit_measurement or ""
-                received_units.append(grn_unit)
-                total_received += _quantity_to_mt(
-                    grn_line.quantity or 0,
-                    grn_unit,
-                )
+            for grn_line in grn_lines:
+                received_units.append(grn_line.unit_measurement or "")
+            total_received = _sum_movement_lines_for_comparison(grn_lines, order_unit)
 
             this_grn = this_grn_by_item.get(item_name, {"qty": 0.0, "unit": ""})
             unit_label = _comparison_unit_label(order_unit, received_units)
+            comparable = _units_comparable_for_variance(order_unit, received_units)
+            if comparable:
+                total_ordered = _quantity_for_comparison(
+                    ordered_raw,
+                    order_unit,
+                    order_unit,
+                )
+                total_ordered = _round_comparison_qty(total_ordered, order_unit)
+                total_received = _round_comparison_qty(total_received, order_unit)
+                variance = _normalize_comparison_variance(
+                    total_received - total_ordered,
+                    order_unit,
+                )
+            else:
+                variance = None
 
             per_grn_receipts = []
             for related in related_grns:
                 line_qty = 0.0
                 line_unit = ""
                 for grn_line in related.items.all():
-                    if grn_line.item_name != item_name:
+                    if not _line_matches_item_name(grn_line, item_name):
                         continue
                     line_qty += float(grn_line.quantity or 0)
                     if not line_unit and grn_line.unit_measurement:
@@ -1510,7 +1625,7 @@ def _get_grn_receipt_comparison(grn):
                 "this_grn_quantity": round(float(this_grn["qty"]), 6),
                 "this_grn_unit": this_grn["unit"] or None,
                 "comparison_unit": unit_label,
-                "variance": round(total_received - total_ordered, 6),
+                "variance": round(variance, 6) if variance is not None else None,
                 "per_grn_receipts": per_grn_receipts,
             })
     except Exception as e:
@@ -1522,32 +1637,39 @@ def _get_over_under_receipt(grn):
     """Compute over/under receipt variances vs purchase order."""
     over_items = []
     under_items = []
-    tolerance = 1e-6
     try:
         for row in _get_grn_receipt_comparison(grn):
-            ordered_cmp = _quantity_to_mt(
-                row["ordered_quantity"],
+            variance = row.get("variance")
+            if variance is None:
+                continue
+            tolerance = _comparison_variance_tolerance(row.get("ordered_unit"))
+            if abs(variance) <= tolerance:
+                continue
+            ordered_cmp = _round_comparison_qty(
+                _quantity_for_comparison(
+                    row["ordered_quantity"],
+                    row.get("ordered_unit"),
+                    row.get("ordered_unit"),
+                ),
                 row.get("ordered_unit"),
             )
             received = row["received_total"]
             unit_label = row.get("comparison_unit")
 
-            if received > ordered_cmp + tolerance:
-                variance = received - ordered_cmp
+            if variance > 0:
                 over_items.append({
                     "item_name": row["item_name"],
-                    "invoiced": round(ordered_cmp, 6),
-                    "delivered": round(received, 6),
+                    "invoiced": ordered_cmp,
+                    "delivered": received,
                     "variance": round(variance, 6),
                     "unit": unit_label,
                 })
-            elif received < ordered_cmp - tolerance:
-                variance = ordered_cmp - received
+            else:
                 under_items.append({
                     "item_name": row["item_name"],
-                    "invoiced": round(ordered_cmp, 6),
-                    "delivered": round(received, 6),
-                    "variance": round(variance, 6),
+                    "invoiced": ordered_cmp,
+                    "delivered": received,
+                    "variance": round(abs(variance), 6),
                     "unit": unit_label,
                 })
     except Exception as e:
@@ -1650,14 +1772,15 @@ def _enrich_grn_detail(grn):
         result["receipt_comparison"] = receipt_comparison
 
     over_items, under_items = _get_over_under_receipt(grn)
-    if over_items:
-        result["over_items"] = over_items
-    if under_items:
-        result["under_items"] = under_items
+    if grn.is_last:
+        if over_items:
+            result["over_items"] = over_items
+        if under_items:
+            result["under_items"] = under_items
 
-    negative_items = _get_negative_stock_for_trigger(trigger_grn=grn)
-    if negative_items:
-        result["negative_items"] = negative_items
+        negative_items = _get_negative_stock_for_trigger(trigger_grn=grn)
+        if negative_items:
+            result["negative_items"] = negative_items
     return result
 
 
@@ -1730,7 +1853,7 @@ def create_grn(request, payload: GrnCreateSchema):
 
         _sync_git_rows_for_grn(grn)
         _apply_grn_is_last_flag(grn, grn.is_last)
-        _check_and_notify_negative_stock(trigger_grn=grn)
+        _maybe_notify_negative_stock(trigger_grn=grn)
         _maybe_notify_over_under_receipt(grn)
 
         grn.refresh_from_db()
@@ -1831,7 +1954,7 @@ def update_GRN(request, grn_no: str, payload: GrnUpdateSchema):
     grn.refresh_from_db()
     _sync_git_rows_for_grn(grn, previous_qty_by_key)
     if payload.items is not None:
-        _check_and_notify_negative_stock(trigger_grn=grn)
+        _maybe_notify_negative_stock(trigger_grn=grn)
     over_items, under_items = _maybe_notify_over_under_receipt(grn)
 
     result = _grn_to_detail(grn)
@@ -1839,7 +1962,7 @@ def update_GRN(request, grn_no: str, payload: GrnUpdateSchema):
         result["over_items"] = over_items
     if under_items:
         result["under_items"] = under_items
-    if payload.items is not None:
+    if grn.is_last and payload.items is not None:
         negative_items = _get_negative_stock_for_trigger(trigger_grn=grn)
         if negative_items:
             result["negative_items"] = negative_items
@@ -1854,7 +1977,8 @@ def delete_GRN(request, grn_no: str):
     grn = get_object_or_404(GRN, grn_no=int(grn_no) if grn_no.isdigit() else grn_no)
     trigger_grn = grn
     grn.delete()
-    _check_and_notify_negative_stock(trigger_grn=trigger_grn)
+    if trigger_grn.is_last:
+        _check_and_notify_negative_stock(trigger_grn=trigger_grn)
     return {"detail": "GRN deleted successfully."}
 
 
@@ -1955,7 +2079,7 @@ def create_dn(request, payload: DnCreateSchema):
                 bags=item["bags"],
             )
 
-        _check_and_notify_negative_stock(trigger_dn=dn)
+        _maybe_notify_negative_stock(trigger_dn=dn)
         _maybe_notify_over_under_delivery(dn)
 
         dn.refresh_from_db()
@@ -2046,7 +2170,7 @@ def update_DN(request, dn_no: str, payload: DnUpdateSchema):
             )
     dn.save()
     dn.refresh_from_db()
-    _check_and_notify_negative_stock(trigger_dn=dn)
+    _maybe_notify_negative_stock(trigger_dn=dn)
     over_items, under_items = _maybe_notify_over_under_delivery(dn)
 
     result = _dn_to_detail(dn)
@@ -2054,9 +2178,10 @@ def update_DN(request, dn_no: str, payload: DnUpdateSchema):
         result["over_items"] = over_items
     if under_items:
         result["under_items"] = under_items
-    negative_items = _get_negative_stock_for_trigger(trigger_dn=dn)
-    if negative_items:
-        result["negative_items"] = negative_items
+    if dn.is_last:
+        negative_items = _get_negative_stock_for_trigger(trigger_dn=dn)
+        if negative_items:
+            result["negative_items"] = negative_items
     return result
 
 

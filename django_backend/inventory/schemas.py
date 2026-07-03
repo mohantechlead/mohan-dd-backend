@@ -87,7 +87,7 @@ class GrnReceiptComparisonSchema(Schema):
     this_grn_quantity: float
     this_grn_unit: Optional[str] = None
     comparison_unit: Optional[str] = None
-    variance: float
+    variance: Optional[float] = None
     per_grn_receipts: Optional[List[GrnPerGrnReceiptSchema]] = None
 
 
@@ -228,7 +228,7 @@ class DnDeliveryComparisonSchema(Schema):
     this_dn_quantity: float
     this_dn_unit: Optional[str] = None
     comparison_unit: Optional[str] = None
-    variance: float
+    variance: Optional[float] = None
     per_dn_deliveries: Optional[List[DnPerDnDeliverySchema]] = None
 
 
