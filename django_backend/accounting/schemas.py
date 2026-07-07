@@ -56,6 +56,7 @@ class VendorPaymentCreateSchema(Schema):
     purchase_number: str
     payment_type: str  # partial | full
     amount: Optional[float] = None
+    insurance: Optional[float] = 0
     remark: Optional[str] = None
 
 
@@ -63,6 +64,7 @@ class VendorPaymentUpdateSchema(Schema):
     payment_date: date
     payment_type: str  # partial | full
     amount: Optional[float] = None
+    insurance: Optional[float] = 0
     remark: Optional[str] = None
 
 
@@ -86,6 +88,8 @@ class VendorPaymentDetailSchema(Schema):
     supplier_name: str
     payment_type: str
     amount: float
+    insurance: float
+    grand_total: float
     status: str
     approved_by: Optional[str] = None
     approval_date: Optional[str] = None

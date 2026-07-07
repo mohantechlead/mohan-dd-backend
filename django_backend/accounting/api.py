@@ -35,6 +35,17 @@ from .schemas import (
 router = Router()
 
 
+def _vendor_payment_grand_total(vp: VendorPayment) -> Decimal:
+    return Decimal(str(vp.amount or 0)) + Decimal(str(vp.insurance or 0))
+
+
+def _parse_non_negative_decimal(value, field_name: str) -> Decimal | JsonResponse:
+    amount = Decimal(str(value if value is not None else 0))
+    if amount < Decimal("0"):
+        return JsonResponse({"detail": f"{field_name} cannot be negative."}, status=400)
+    return amount
+
+
 def _to_schema(expense: ExpensePayment) -> ExpensePaymentDetailSchema:
     return ExpensePaymentDetailSchema(
         id=expense.id,
@@ -92,6 +103,8 @@ def _vendor_payment_to_schema(vp: VendorPayment) -> VendorPaymentDetailSchema:
         supplier_name=vp.supplier_name,
         payment_type=vp.payment_type,
         amount=float(vp.amount),
+        insurance=float(vp.insurance or 0),
+        grand_total=float(_vendor_payment_grand_total(vp)),
         status=vp.status,
         approved_by=vp.approved_by.username if vp.approved_by else None,
         approval_date=vp.approval_date.isoformat() if vp.approval_date else None,
@@ -305,6 +318,10 @@ def create_vendor_payment(request, payload: VendorPaymentCreateSchema):
                 status=400,
             )
 
+    insurance = _parse_non_negative_decimal(payload.insurance, "insurance")
+    if isinstance(insurance, JsonResponse):
+        return insurance
+
     last_installment = (
         VendorPayment.objects.filter(purchase__purchase_number__iexact=purchase.purchase_number)
         .order_by("-installment_number")
@@ -324,6 +341,7 @@ def create_vendor_payment(request, payload: VendorPaymentCreateSchema):
         supplier_name=purchase.shipper,
         payment_type=payment_type,
         amount=amount,
+        insurance=insurance,
         remark=(payload.remark or "").strip() or None,
         status="pending",
     )
@@ -373,9 +391,14 @@ def update_vendor_payment(request, payment_number: str, payload: VendorPaymentUp
                 status=400,
             )
 
+    insurance = _parse_non_negative_decimal(payload.insurance, "insurance")
+    if isinstance(insurance, JsonResponse):
+        return insurance
+
     vp.payment_date = payload.payment_date
     vp.payment_type = payment_type
     vp.amount = amount
+    vp.insurance = insurance
     vp.remark = (payload.remark or "").strip() or None
     vp.save()
     return _vendor_payment_to_schema(vp)
