@@ -71,6 +71,7 @@ from .models import (
     GIT,
     ShippingInvoice,
     ShippingInvoiceItem,
+    MarineInsurance,
 )
 from .schemas import (
     GrnCreateSchema,
@@ -103,6 +104,10 @@ from .schemas import (
     PurchaseApproveSchema,
     PurchaseStatusUpdateSchema,
     PurchaseUpdateSchema,
+    MarineInsuranceSchema,
+    MarineInsuranceCreateSchema,
+    MarineInsuranceUpdateSchema,
+    MarineInsuranceReminderSchema,
     ShippingInvoiceCreateSchema,
     ShippingInvoiceSummarySchema,
     ShippingInvoiceDetailSchema,
@@ -129,6 +134,28 @@ def _purchase_aggregate_from_line_items(items) -> tuple[Decimal, float, float]:
     before_vat = sum(Decimal(str(i.total_price)) for i in items)
     qty_sum = sum(float(i.quantity) for i in items)
     return before_vat, qty_sum, qty_sum
+
+
+def get_missing_marine_insurance_purchases(now=None):
+    """Return approved purchases that lack marine insurance and whose approval month is current or earlier."""
+    if now is None:
+        now = timezone.now()
+
+    missing_purchases = []
+    for purchase in Purchase.objects.filter(status="approved").select_related("marine_insurance"):
+        if getattr(purchase, "marine_insurance", None) is not None:
+            continue
+        if purchase.approval_date is None:
+            continue
+        approval_date = purchase.approval_date
+        if approval_date.year > now.year:
+            continue
+        if approval_date.year < now.year:
+            missing_purchases.append(purchase)
+            continue
+        if approval_date.month <= now.month:
+            missing_purchases.append(purchase)
+    return missing_purchases
 
 
 def _order_aggregate_from_line_items(items) -> tuple[Decimal, float, float]:
@@ -2945,6 +2972,73 @@ def next_purchase_number(request):
     """Suggest next purchase number from max existing MPDDFZE### (e.g. MPDDFZE003)."""
     values = Purchase.objects.values_list("purchase_number", flat=True)
     return {"next_number": _next_mpddfze_purchase_number(values)}
+
+
+@router.get("/purchases/missing-marine-insurance", response=List[MarineInsuranceReminderSchema], auth=JWTAuth())
+def list_missing_marine_insurance_purchases(request):
+    missing_purchases = get_missing_marine_insurance_purchases()
+    return [
+        MarineInsuranceReminderSchema(
+            purchase_number=purchase.purchase_number,
+            order_date=purchase.order_date,
+            buyer=purchase.buyer,
+        )
+        for purchase in missing_purchases
+    ]
+
+
+@router.get("/purchases/{purchase_number}/marine-insurance", response=MarineInsuranceSchema, auth=JWTAuth())
+def get_purchase_marine_insurance(request, purchase_number: str):
+    purchase = get_object_or_404(Purchase, purchase_number__iexact=purchase_number.strip())
+    marine_insurance = get_object_or_404(MarineInsurance, purchase=purchase)
+    return MarineInsuranceSchema(
+        id=marine_insurance.id,
+        insurance_number=marine_insurance.insurance_number,
+        insurance_date=marine_insurance.insurance_date,
+        created_at=marine_insurance.created_at,
+        updated_at=marine_insurance.updated_at,
+    )
+
+
+@router.post("/purchases/{purchase_number}/marine-insurance", response=MarineInsuranceSchema, auth=JWTAuth())
+def create_purchase_marine_insurance(request, purchase_number: str, payload: MarineInsuranceCreateSchema):
+    purchase = get_object_or_404(Purchase, purchase_number__iexact=purchase_number.strip())
+    if purchase.status != "approved":
+        return JsonResponse({"detail": "Marine insurance can only be managed for approved purchases."}, status=403)
+    if MarineInsurance.objects.filter(purchase=purchase).exists():
+        return JsonResponse({"detail": "Marine insurance already exists for this purchase."}, status=400)
+
+    marine_insurance = MarineInsurance.objects.create(
+        purchase=purchase,
+        insurance_number=payload.insurance_number.strip(),
+        insurance_date=payload.insurance_date,
+    )
+    return MarineInsuranceSchema(
+        id=marine_insurance.id,
+        insurance_number=marine_insurance.insurance_number,
+        insurance_date=marine_insurance.insurance_date,
+        created_at=marine_insurance.created_at,
+        updated_at=marine_insurance.updated_at,
+    )
+
+
+@router.put("/purchases/{purchase_number}/marine-insurance", response=MarineInsuranceSchema, auth=JWTAuth())
+def update_purchase_marine_insurance(request, purchase_number: str, payload: MarineInsuranceUpdateSchema):
+    purchase = get_object_or_404(Purchase, purchase_number__iexact=purchase_number.strip())
+    if purchase.status != "approved":
+        return JsonResponse({"detail": "Marine insurance can only be managed for approved purchases."}, status=403)
+
+    marine_insurance = get_object_or_404(MarineInsurance, purchase=purchase)
+    marine_insurance.insurance_number = payload.insurance_number.strip()
+    marine_insurance.insurance_date = payload.insurance_date
+    marine_insurance.save()
+    return MarineInsuranceSchema(
+        id=marine_insurance.id,
+        insurance_number=marine_insurance.insurance_number,
+        insurance_date=marine_insurance.insurance_date,
+        created_at=marine_insurance.created_at,
+        updated_at=marine_insurance.updated_at,
+    )
 
 
 @router.get("/purchases/{purchase_number}", response=PurchaseDetailSchema, auth=JWTAuth())

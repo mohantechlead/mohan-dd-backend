@@ -5,6 +5,7 @@ from django.http import JsonResponse
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from ninja import Router
+from ninja_jwt.authentication import JWTAuth
 
 from .models import (
     ExpensePayment,
@@ -289,7 +290,7 @@ def update_expense_payment_status(request, expense_number: str, payload: Expense
     return _to_schema(expense)
 
 
-@router.post("/vendor-payments", response=VendorPaymentDetailSchema)
+@router.post("/vendor-payments", response=VendorPaymentDetailSchema, auth=JWTAuth())
 def create_vendor_payment(request, payload: VendorPaymentCreateSchema):
     purchase = get_object_or_404(
         Purchase,
@@ -354,25 +355,25 @@ def create_vendor_payment(request, payload: VendorPaymentCreateSchema):
     return _vendor_payment_to_schema(vp)
 
 
-@router.get("/vendor-payments", response=List[VendorPaymentDetailSchema])
+@router.get("/vendor-payments", response=List[VendorPaymentDetailSchema], auth=JWTAuth())
 def list_vendor_payments(request):
     rows = VendorPayment.objects.select_related("purchase").all().order_by("-payment_number")
     return [_vendor_payment_to_schema(vp) for vp in rows]
 
 
-@router.get("/vendor-payments/next-number")
+@router.get("/vendor-payments/next-number", auth=JWTAuth())
 def vendor_payment_next_number(request):
     values = VendorPayment.objects.values_list("payment_number", flat=True)
     return {"next_number": next_vendor_payment_number(values)}
 
 
-@router.get("/vendor-payments/{payment_number}", response=VendorPaymentDetailSchema)
+@router.get("/vendor-payments/{payment_number}", response=VendorPaymentDetailSchema, auth=JWTAuth())
 def get_vendor_payment(request, payment_number: str):
     vp = get_object_or_404(VendorPayment, payment_number__iexact=payment_number.strip())
     return _vendor_payment_to_schema(vp)
 
 
-@router.put("/vendor-payments/{payment_number}", response=VendorPaymentDetailSchema)
+@router.put("/vendor-payments/{payment_number}", response=VendorPaymentDetailSchema, auth=JWTAuth())
 def update_vendor_payment(request, payment_number: str, payload: VendorPaymentUpdateSchema):
     vp = get_object_or_404(VendorPayment, payment_number__iexact=payment_number.strip())
     purchase_total, already_paid_without_me, remaining_without_me, _ = _payment_totals_for_purchase(vp.purchase_id, exclude_id=vp.id)
@@ -415,14 +416,14 @@ def update_vendor_payment(request, payment_number: str, payload: VendorPaymentUp
     return _vendor_payment_to_schema(vp)
 
 
-@router.delete("/vendor-payments/{payment_number}")
+@router.delete("/vendor-payments/{payment_number}", auth=JWTAuth())
 def delete_vendor_payment(request, payment_number: str):
     vp = get_object_or_404(VendorPayment, payment_number__iexact=payment_number.strip())
     vp.delete()
     return {"detail": "Vendor payment deleted successfully."}
 
 
-@router.post("/vendor-payments/{payment_number}/approve", response=VendorPaymentDetailSchema)
+@router.post("/vendor-payments/{payment_number}/approve", response=VendorPaymentDetailSchema, auth=JWTAuth())
 def approve_vendor_payment(request, payment_number: str, payload: VendorPaymentApproveSchema):
     vp = get_object_or_404(VendorPayment, payment_number__iexact=payment_number.strip())
     vp.status = "approved"
@@ -432,7 +433,7 @@ def approve_vendor_payment(request, payment_number: str, payload: VendorPaymentA
     return _vendor_payment_to_schema(vp)
 
 
-@router.post("/vendor-payments/{payment_number}/update-status", response=VendorPaymentDetailSchema)
+@router.post("/vendor-payments/{payment_number}/update-status", response=VendorPaymentDetailSchema, auth=JWTAuth())
 def update_vendor_payment_status(request, payment_number: str, payload: VendorPaymentStatusUpdateSchema):
     vp = get_object_or_404(VendorPayment, payment_number__iexact=payment_number.strip())
     if vp.status != "approved":

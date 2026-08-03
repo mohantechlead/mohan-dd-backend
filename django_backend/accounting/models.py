@@ -84,7 +84,7 @@ class VendorPayment(models.Model):
     payment_type = models.CharField(max_length=20, choices=PAYMENT_TYPE_CHOICES)
     amount = models.DecimalField(max_digits=14, decimal_places=2)
     insurance = models.DecimalField(max_digits=14, decimal_places=2, default=0)
-    freight = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    freight = models.DecimalField(max_digits=15, decimal_places=2, default=0, blank=True)
     remark = models.TextField(blank=True, null=True)
     status = models.CharField(max_length=20, default="pending")
     approved_by = models.ForeignKey(

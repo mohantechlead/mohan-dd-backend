@@ -2,6 +2,7 @@ from ninja import Schema
 from typing import List, Optional
 import uuid
 from datetime import date as datetime_date
+from datetime import datetime as datetime_value
 
 # Keep legacy `date` name for existing schema annotations in this file.
 date = datetime_date
@@ -468,6 +469,30 @@ class PurchaseItemCreateSchema(Schema):
     # Line before VAT; if omitted, server sets = total_price
     before_vat: Optional[float] = None
     hscode: Optional[str] = None
+
+
+class MarineInsuranceSchema(Schema):
+    id: uuid.UUID
+    insurance_number: str
+    insurance_date: datetime_date
+    created_at: datetime_value
+    updated_at: datetime_value
+
+
+class MarineInsuranceCreateSchema(Schema):
+    insurance_number: str
+    insurance_date: datetime_date
+
+
+class MarineInsuranceUpdateSchema(Schema):
+    insurance_number: str
+    insurance_date: datetime_date
+
+
+class MarineInsuranceReminderSchema(Schema):
+    purchase_number: str
+    order_date: datetime_date
+    buyer: str
 
 
 class PurchaseCreateSchema(Schema):
