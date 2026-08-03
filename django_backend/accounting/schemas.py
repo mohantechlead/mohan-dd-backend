@@ -57,6 +57,7 @@ class VendorPaymentCreateSchema(Schema):
     payment_type: str  # partial | full
     amount: Optional[float] = None
     insurance: Optional[float] = 0
+    freight: Optional[float] = 0
     remark: Optional[str] = None
 
 
@@ -65,6 +66,7 @@ class VendorPaymentUpdateSchema(Schema):
     payment_type: str  # partial | full
     amount: Optional[float] = None
     insurance: Optional[float] = 0
+    freight: Optional[float] = 0
     remark: Optional[str] = None
 
 
@@ -89,6 +91,7 @@ class VendorPaymentDetailSchema(Schema):
     payment_type: str
     amount: float
     insurance: float
+    freight: float
     grand_total: float
     status: str
     approved_by: Optional[str] = None

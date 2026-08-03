@@ -36,7 +36,7 @@ router = Router()
 
 
 def _vendor_payment_grand_total(vp: VendorPayment) -> Decimal:
-    return Decimal(str(vp.amount or 0)) + Decimal(str(vp.insurance or 0))
+    return Decimal(str(vp.amount or 0)) + Decimal(str(vp.insurance or 0)) + Decimal(str(vp.freight or 0))
 
 
 def _parse_non_negative_decimal(value, field_name: str) -> Decimal | JsonResponse:
@@ -104,6 +104,7 @@ def _vendor_payment_to_schema(vp: VendorPayment) -> VendorPaymentDetailSchema:
         payment_type=vp.payment_type,
         amount=float(vp.amount),
         insurance=float(vp.insurance or 0),
+        freight=float(vp.freight or 0),
         grand_total=float(_vendor_payment_grand_total(vp)),
         status=vp.status,
         approved_by=vp.approved_by.username if vp.approved_by else None,
@@ -322,6 +323,10 @@ def create_vendor_payment(request, payload: VendorPaymentCreateSchema):
     if isinstance(insurance, JsonResponse):
         return insurance
 
+    freight = _parse_non_negative_decimal(payload.freight, "freight")
+    if isinstance(freight, JsonResponse):
+        return freight
+
     last_installment = (
         VendorPayment.objects.filter(purchase__purchase_number__iexact=purchase.purchase_number)
         .order_by("-installment_number")
@@ -342,6 +347,7 @@ def create_vendor_payment(request, payload: VendorPaymentCreateSchema):
         payment_type=payment_type,
         amount=amount,
         insurance=insurance,
+        freight=freight,
         remark=(payload.remark or "").strip() or None,
         status="pending",
     )
@@ -395,10 +401,15 @@ def update_vendor_payment(request, payment_number: str, payload: VendorPaymentUp
     if isinstance(insurance, JsonResponse):
         return insurance
 
+    freight = _parse_non_negative_decimal(payload.freight, "freight")
+    if isinstance(freight, JsonResponse):
+        return freight
+
     vp.payment_date = payload.payment_date
     vp.payment_type = payment_type
     vp.amount = amount
     vp.insurance = insurance
+    vp.freight = freight
     vp.remark = (payload.remark or "").strip() or None
     vp.save()
     return _vendor_payment_to_schema(vp)
