@@ -15,6 +15,7 @@ from inventory.api import (
     _sum_movement_lines_for_comparison,
     _units_comparable_for_variance,
 )
+from inventory.schemas import MarineInsuranceSchema
 
 
 class NegativeStockFilterTests(TestCase):
@@ -110,6 +111,53 @@ class MaybeNotifyNegativeStockTests(TestCase):
         grn.is_last = True
         _maybe_notify_negative_stock(trigger_grn=grn)
         mock_notify.assert_called_once_with(trigger_dn=None, trigger_grn=grn)
+
+
+class MarineInsuranceSchemaTests(TestCase):
+    def test_accepts_uuid_model_id(self):
+        from inventory.models import MarineInsurance, Purchase
+
+        purchase = Purchase.objects.create(
+            purchase_number="MPDDFZE004",
+            proforma_ref_no="PF-004",
+            buyer="Buyer Four",
+            order_date=date.today(),
+            shipper="Supplier Four",
+            country_of_origin="China",
+            final_destination="Ethiopia",
+            port_of_loading="Shanghai",
+            port_of_discharge="Djibouti",
+            payment_terms="TT",
+            mode_of_transport="Sea",
+            shipment_type="LCL",
+            status="approved",
+        )
+        marine_insurance = MarineInsurance.objects.create(
+            purchase=purchase,
+            insurance_number="INS-004",
+            insurance_date=date.today(),
+        )
+
+        schema = MarineInsuranceSchema(
+            id=marine_insurance.id,
+            insurance_number=marine_insurance.insurance_number,
+            insurance_date=marine_insurance.insurance_date,
+            created_at=marine_insurance.created_at,
+            updated_at=marine_insurance.updated_at,
+        )
+
+        self.assertEqual(schema.id, str(marine_insurance.id))
+
+    def test_accepts_legacy_integer_id(self):
+        schema = MarineInsuranceSchema(
+            id=2,
+            insurance_number="INS-LEGACY",
+            insurance_date=date.today(),
+            created_at=timezone.now(),
+            updated_at=timezone.now(),
+        )
+
+        self.assertEqual(schema.id, "2")
 
 
 class MissingMarineInsuranceTests(TestCase):

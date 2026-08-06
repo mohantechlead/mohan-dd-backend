@@ -3,6 +3,7 @@ from typing import List, Optional
 import uuid
 from datetime import date as datetime_date
 from datetime import datetime as datetime_value
+from pydantic import field_validator
 
 # Keep legacy `date` name for existing schema annotations in this file.
 date = datetime_date
@@ -472,11 +473,22 @@ class PurchaseItemCreateSchema(Schema):
 
 
 class MarineInsuranceSchema(Schema):
-    id: uuid.UUID
+    id: str
     insurance_number: str
     insurance_date: datetime_date
     created_at: datetime_value
     updated_at: datetime_value
+
+    @field_validator("id", mode="before")
+    @classmethod
+    def normalize_id(cls, value):
+        if value is None:
+            return ""
+        if isinstance(value, uuid.UUID):
+            return str(value)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            return str(value)
+        return value
 
 
 class MarineInsuranceCreateSchema(Schema):

@@ -309,6 +309,7 @@ class Purchase(models.Model):
 
 
 class MarineInsurance(models.Model):
+    id = models.BigAutoField(primary_key=True, editable=False)
     purchase = models.OneToOneField(
         Purchase,
         on_delete=models.CASCADE,

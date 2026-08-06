@@ -2992,7 +2992,7 @@ def get_purchase_marine_insurance(request, purchase_number: str):
     purchase = get_object_or_404(Purchase, purchase_number__iexact=purchase_number.strip())
     marine_insurance = get_object_or_404(MarineInsurance, purchase=purchase)
     return MarineInsuranceSchema(
-        id=marine_insurance.id,
+        id=str(marine_insurance.id),
         insurance_number=marine_insurance.insurance_number,
         insurance_date=marine_insurance.insurance_date,
         created_at=marine_insurance.created_at,
@@ -3014,7 +3014,7 @@ def create_purchase_marine_insurance(request, purchase_number: str, payload: Mar
         insurance_date=payload.insurance_date,
     )
     return MarineInsuranceSchema(
-        id=marine_insurance.id,
+        id=str(marine_insurance.id),
         insurance_number=marine_insurance.insurance_number,
         insurance_date=marine_insurance.insurance_date,
         created_at=marine_insurance.created_at,
@@ -3033,7 +3033,7 @@ def update_purchase_marine_insurance(request, purchase_number: str, payload: Mar
     marine_insurance.insurance_date = payload.insurance_date
     marine_insurance.save()
     return MarineInsuranceSchema(
-        id=marine_insurance.id,
+        id=str(marine_insurance.id),
         insurance_number=marine_insurance.insurance_number,
         insurance_date=marine_insurance.insurance_date,
         created_at=marine_insurance.created_at,
