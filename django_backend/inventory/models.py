@@ -308,6 +308,22 @@ class Purchase(models.Model):
         return f"{self.purchase_number} ({self.buyer})"
 
 
+class MarineInsurance(models.Model):
+    id = models.BigAutoField(primary_key=True, editable=False)
+    purchase = models.OneToOneField(
+        Purchase,
+        on_delete=models.CASCADE,
+        related_name="marine_insurance",
+    )
+    insurance_number = models.CharField(max_length=100)
+    insurance_date = models.DateField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.insurance_number} ({self.purchase.purchase_number})"
+
+
 class PurchaseItem(models.Model):
     item_id = models.UUIDField(default=uuid.uuid4, editable=False)
     # Link to Purchase by business key (purchase_number), not UUID id
