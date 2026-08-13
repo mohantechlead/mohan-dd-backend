@@ -58,6 +58,7 @@ class VendorPaymentCreateSchema(Schema):
     amount: Optional[float] = None
     insurance: Optional[float] = 0
     freight: Optional[float] = 0
+    inland_transport: Optional[float] = 0
     remark: Optional[str] = None
 
 
@@ -67,6 +68,7 @@ class VendorPaymentUpdateSchema(Schema):
     amount: Optional[float] = None
     insurance: Optional[float] = 0
     freight: Optional[float] = 0
+    inland_transport: Optional[float] = 0
     remark: Optional[str] = None
 
 
@@ -92,6 +94,7 @@ class VendorPaymentDetailSchema(Schema):
     amount: float
     insurance: float
     freight: float
+    inland_transport: float
     grand_total: float
     status: str
     approved_by: Optional[str] = None
