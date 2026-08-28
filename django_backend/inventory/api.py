@@ -7,6 +7,7 @@ from ninja import Router
 from typing import List, Optional
 from datetime import date as date_type
 from datetime import datetime
+from datetime import timedelta
 from django.shortcuts import get_object_or_404
 from django.db.models import Q
 from django.core.mail import send_mail
@@ -72,6 +73,12 @@ from .models import (
     ShippingInvoice,
     ShippingInvoiceItem,
     MarineInsurance,
+    WarehouseStorageNote,
+    WarehouseStorageItem,
+    ExpirationFeeTier,
+    WarehouseStorageTopUp,
+    WarehouseReleaseNote,
+    WarehouseReleaseItem,
 )
 from .schemas import (
     GrnCreateSchema,
@@ -113,6 +120,19 @@ from .schemas import (
     ShippingInvoiceDetailSchema,
     ShippingInvoiceItemSchema,
     ShippingInvoiceUpdateSchema,
+    WarehouseStorageItemCreateSchema,
+    ExpirationFeeTierCreateSchema,
+    WarehouseStorageNoteCreatePayloadSchema,
+    ExpirationFeeTierSchema,
+    WarehouseStorageItemSchema,
+    WarehouseStorageTopUpCreateSchema,
+    WarehouseStorageTopUpSchema,
+    WarehouseStorageNoteDetailSchema,
+    WarehouseStorageNoteUpdateSchema,
+    WarehouseReleaseItemCreateSchema,
+    WarehouseReleaseNoteCreateSchema,
+    WarehouseReleaseItemSchema,
+    WarehouseReleaseNoteDetailSchema,
 )
 import uuid
 from django.http import JsonResponse
@@ -3692,4 +3712,616 @@ def authorize_shipping_invoice(request, invoice_id: uuid.UUID):
         logger.exception("Failed to send authorize notification email: %s", e)
 
     return _shipping_invoice_to_detail_schema(invoice)
+
+
+# ============================================================
+# In-Warehouse storage (WSN / WRN)
+# ============================================================
+
+_PERIOD_UNITS = ("days", "weeks", "months")
+
+
+def _add_periods(start: date_type, value: int, unit: str) -> date_type:
+    """Return the date `value` periods after `start`. Month arithmetic keeps the day,
+    clamped to the last day of the target month (e.g. Jan 31 + 1 month -> Feb 28/29)."""
+    unit = (unit or "months").lower()
+    if unit == "days":
+        return start + timedelta(days=int(value or 0))
+    if unit == "weeks":
+        return start + timedelta(days=7 * int(value or 0))
+    # months
+    from calendar import monthrange
+    month = start.month - 1 + int(value or 0)
+    year = start.year + (month // 12)
+    month = (month % 12) + 1
+    last_day = monthrange(year, month)[1]
+    return start.replace(year=year, month=month, day=min(start.day, last_day))
+
+
+def _period_days(value: int, unit: str) -> int:
+    unit = (unit or "months").lower()
+    if unit == "days":
+        return int(value or 0)
+    if unit == "weeks":
+        return 7 * int(value or 0)
+    return 30 * int(value or 0)  # approximate for interval counting
+
+
+def _storage_expiry_date(note) -> date_type:
+    """Date the contracted storage period ends (storage start + storage period)."""
+    return _add_periods(note.date, note.storage_period_value, note.storage_period_unit)
+
+
+def _current_expiry_date(note) -> date_type:
+    """Effective expiry = storage expiry + grace period + all pre-expiry top-ups."""
+    expiry = _add_periods(note.date, note.storage_period_value, note.storage_period_unit)
+    expiry = _add_periods(expiry, note.grace_period_value, note.grace_period_unit)
+    for top_up in note.top_ups.all():
+        expiry = _add_periods(
+            expiry, top_up.additional_period_value, top_up.additional_period_unit
+        )
+    return expiry
+
+
+def _count_periods_elapsed(start: date_type, as_of: date_type, value: int, unit: str) -> int:
+    """Count whole (value, unit) periods that have fully elapsed between start and as_of."""
+    if as_of <= start:
+        return 0
+    if unit == "days":
+        return (as_of - start).days // max(int(value or 0), 1)
+    if unit == "weeks":
+        return (as_of - start).days // max(7 * int(value or 0), 7)
+    # months: walk forward adding whole months
+    count = 0
+    cursor = start
+    while True:
+        nxt = _add_periods(cursor, int(value or 1), "months")
+        if nxt > as_of:
+            break
+        cursor = nxt
+        count += 1
+    return count
+
+
+def _compute_expiration(note, as_of: date_type | None = None) -> dict:
+    """Compute expiration state for a storage note without mutating anything."""
+    as_of = as_of or timezone.localdate()
+    storage_expiry = _storage_expiry_date(note)
+    current_expiry = _current_expiry_date(note)
+    expired = as_of >= current_expiry
+
+    periods_expired = 0
+    current_fee = None
+    if expired:
+        tiers = list(note.expiration_fee_tiers.all())
+        if tiers:
+            interval_value = tiers[0].period_value
+            interval_unit = tiers[0].period_unit
+            periods_expired = max(
+                _count_periods_elapsed(current_expiry, as_of, interval_value, interval_unit),
+                1,
+            )
+            # Select the greatest defined tier whose index is <= periods_expired,
+            # else the highest tier (fee keeps increasing but caps at max tier).
+            applicable = None
+            for tier in tiers:
+                if tier.tier_index <= periods_expired:
+                    applicable = tier
+            if applicable is None and tiers:
+                applicable = max(tiers, key=lambda t: t.tier_index)
+            if applicable is not None:
+                current_fee = float(applicable.fee_amount)
+        else:
+            periods_expired = 1
+
+    return {
+        "storage_expiry_date": storage_expiry,
+        "current_expiry_date": current_expiry,
+        "expired": expired,
+        "periods_expired": periods_expired,
+        "current_expiration_fee": current_fee,
+    }
+
+
+def _storage_note_to_schema(note) -> dict:
+    exp = _compute_expiration(note)
+    return {
+        "id": note.id,
+        "wsn_no": note.wsn_no,
+        "customer_name": note.customer_name,
+        "date": note.date,
+        "ECD_no": note.ECD_no,
+        "remark": note.remark,
+        "storage_period_value": note.storage_period_value,
+        "storage_period_unit": note.storage_period_unit,
+        "storage_price": float(note.storage_price),
+        "grace_period_value": note.grace_period_value,
+        "grace_period_unit": note.grace_period_unit,
+        "status": note.status,
+        "is_active": note.is_active,
+        "storage_expiry_date": exp["storage_expiry_date"],
+        "current_expiry_date": exp["current_expiry_date"],
+        "expired": exp["expired"],
+        "periods_expired": exp["periods_expired"],
+        "current_expiration_fee": exp["current_expiration_fee"],
+        "items": [
+            {
+                "item_id": i.item_id,
+                "item_name": i.item_name,
+                "code": i.code,
+                "quantity": i.quantity,
+                "unit_measurement": i.unit_measurement,
+                "internal_code": i.internal_code,
+                "bags": i.bags,
+                "remaining_quantity": i.remaining_quantity,
+            }
+            for i in note.items.all()
+        ],
+        "expiration_fee_tiers": [
+            {
+                "id": t.id,
+                "tier_index": t.tier_index,
+                "period_value": t.period_value,
+                "period_unit": t.period_unit,
+                "fee_amount": float(t.fee_amount),
+            }
+            for t in note.expiration_fee_tiers.all()
+        ],
+        "top_ups": [
+            {
+                "id": t.id,
+                "top_up_date": t.top_up_date,
+                "additional_period_value": t.additional_period_value,
+                "additional_period_unit": t.additional_period_unit,
+                "price": float(t.price),
+                "remark": t.remark,
+            }
+            for t in note.top_ups.all()
+        ],
+    }
+
+
+def _warehouse_expiry_recipients() -> list:
+    recipients = getattr(settings, "WAREHOUSE_EXPIRATION_RECIPIENTS", [])
+    if not recipients:
+        # Fall back to the shared inventory notification list for backward compatibility.
+        recipients = getattr(settings, "NOTIFICATION_EMAIL_RECIPIENTS", [])
+    return recipients
+
+
+def _check_and_notify_warehouse_expiry(note) -> bool:
+    """Send an expired-notification email for a single storage note. Returns True if sent.
+
+    Notifications are de-duplicated: a note is only emailed when it first expires and
+    again whenever the applicable expiration-fee tier escalates (e.g. tier 1 -> tier 2).
+    """
+    exp = _compute_expiration(note)
+    if not exp["expired"]:
+        return False
+    if note.status == "released":
+        return False
+
+    tier = exp["periods_expired"]
+    # Pull the freshest dedup state in case the same in-memory object was used before.
+    note.refresh_from_db(fields=["expiry_notified", "last_notified_tier"])
+    # Skip if already notified for this exact tier (no escalation, no new expiry).
+    if note.expiry_notified and note.last_notified_tier == tier:
+        return False
+
+    recipient_list = _warehouse_expiry_recipients()
+    if not recipient_list:
+        logger.warning(
+            "Warehouse expiration notification skipped: no recipient list configured"
+        )
+        return False
+
+    def _esc(s):
+        return html.escape(str(s) if s is not None else "")
+
+    fee_text = (
+        f"{exp['current_expiration_fee']:.2f}"
+        if exp["current_expiration_fee"] is not None
+        else "see agreement"
+    )
+    expiry_str = exp["current_expiry_date"].isoformat() if exp["current_expiry_date"] else "—"
+
+    items_plain_lines = "\n".join(
+        f"  - {i['item_name']} (code: {i.get('code') or '—'}): "
+        f"quantity={i['quantity']}, remaining={i['remaining_quantity']}"
+        for i in _warehouse_storage_basic_items(note)
+    )
+
+    plain_message = (
+        f"WAREHOUSE STORAGE EXPIRY NOTIFICATION\n"
+        f"{'=' * 40}\n\n"
+        f"A stored product has reached its storage expiry date.\n\n"
+        f"STORAGE DETAILS\n"
+        f"  Storage Note (WSN):  {note.wsn_no}\n"
+        f"  Customer:            {note.customer_name}\n"
+        f"  Storage Start:       {note.date.isoformat()}\n"
+        f"  Expiry Date:         {expiry_str}\n"
+        f"  Periods Expired:     {exp['periods_expired']}\n"
+        f"  Current Expiry Fee:  ${fee_text}\n\n"
+        f"STORED ITEMS\n"
+        f"{items_plain_lines}\n\n"
+        f"An expiration fee now applies. Please contact the customer to renew (top-up) "
+        f"or release the product from storage.\n"
+    )
+
+    item_rows = "".join(
+        f"""
+            <tr>
+                <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;">{_esc(i['item_name'])}</td>
+                <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:right;">{_esc(i['code'] or '—')}</td>
+                <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:right;">{_esc(i['quantity'])}</td>
+                <td style="padding:8px 12px;border-bottom:1px solid #e5e7eb;text-align:right;">{_esc(i['remaining_quantity'])}</td>
+            </tr>"""
+        for i in _warehouse_storage_basic_items(note)
+    )
+
+    html_message = f"""
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Warehouse Storage Expiry</title>
+</head>
+<body style="margin:0;font-family:Arial,sans-serif;background-color:#f4f4f5;padding:24px;">
+  <div style="max-width:600px;margin:0 auto;background:#fff;border-radius:8px;overflow:hidden;box-shadow:0 1px 3px rgba(0,0,0,0.08);">
+    <div style="background:linear-gradient(135deg,#d97706 0%,#b45309 100%);color:#fff;padding:20px 24px;">
+      <h1 style="margin:0;font-size:20px;font-weight:600;">Warehouse Storage Expiry</h1>
+      <p style="margin:8px 0 0;font-size:14px;opacity:0.95;">WSN #{_esc(note.wsn_no)} · {_esc(note.customer_name)}</p>
+    </div>
+    <div style="padding:24px;">
+      <p style="margin:0 0 16px;color:#374151;font-size:15px;line-height:1.5;">
+        A stored product has passed its storage expiry date. An expiration fee now applies; please
+        contact the customer to renew (top-up) or release the product.
+      </p>
+      <table style="width:100%;border-collapse:collapse;margin-bottom:20px;font-size:14px;">
+        <tr><td style="padding:6px 0;color:#6b7280;width:45%;">Storage Note</td><td style="padding:6px 0;color:#111827;font-weight:500;">{_esc(note.wsn_no)}</td></tr>
+        <tr><td style="padding:6px 0;color:#6b7280;">Customer</td><td style="padding:6px 0;color:#111827;">{_esc(note.customer_name or '—')}</td></tr>
+        <tr><td style="padding:6px 0;color:#6b7280;">Storage Start</td><td style="padding:6px 0;color:#111827;">{_esc(note.date.isoformat())}</td></tr>
+        <tr><td style="padding:6px 0;color:#6b7280;">Expiry Date</td><td style="padding:6px 0;color:#111827;">{_esc(expiry_str)}</td></tr>
+        <tr><td style="padding:6px 0;color:#6b7280;">Periods Expired</td><td style="padding:6px 0;color:#111827;">{_esc(exp['periods_expired'])}</td></tr>
+        <tr><td style="padding:6px 0;color:#6b7280;">Current Expiry Fee</td><td style="padding:6px 0;color:#111827;font-weight:600;">${_esc(fee_text)}</td></tr>
+      </table>
+      <h3 style="margin:0 0 12px;font-size:14px;color:#b45309;">Stored Items ({len(_warehouse_storage_basic_items(note))})</h3>
+      <table style="width:100%;border-collapse:collapse;font-size:13px;border:1px solid #e5e7eb;border-radius:6px;background:#fff;">
+        <thead>
+          <tr style="background:#f9fafb;">
+            <th style="padding:10px 12px;text-align:left;font-weight:600;color:#374151;">Item</th>
+            <th style="padding:10px 12px;text-align:right;font-weight:600;color:#374151;">Code</th>
+            <th style="padding:10px 12px;text-align:right;font-weight:600;color:#374151;">Quantity</th>
+            <th style="padding:10px 12px;text-align:right;font-weight:600;color:#374151;">Remaining</th>
+          </tr>
+        </thead>
+        <tbody>{item_rows}
+        </tbody>
+      </table>
+    </div>
+    <div style="padding:12px 24px;background:#f9fafb;font-size:12px;color:#6b7280;text-align:center;">
+      This is an automated notification from the Mohan inventory system.
+    </div>
+  </div>
+</body>
+</html>
+"""
+
+    subject = f"Warehouse Storage Expiry – WSN {note.wsn_no} – {note.customer_name}"
+    try:
+        sent = _send_notification_mail(
+            subject=subject,
+            message=plain_message,
+            recipient_list=recipient_list,
+            html_message=html_message,
+        )
+        if sent > 0:
+            logger.info("Warehouse expiry notification sent for WSN %s", note.wsn_no)
+            WarehouseStorageNote.objects.filter(pk=note.pk).update(
+                expiry_notified=True,
+                last_notified_tier=tier,
+                last_notified_at=timezone.now(),
+            )
+            return True
+        logger.warning("Warehouse expiry email sent count was 0 for WSN %s", note.wsn_no)
+        return False
+    except Exception as e:  # noqa: BLE001 - match existing pattern
+        logger.exception("Failed to send warehouse expiry notification for WSN %s: %s", note.wsn_no, e)
+        return False
+
+
+def _warehouse_storage_basic_items(note) -> list[dict]:
+    """Convenience helper returning basic stored-item dicts for email rendering."""
+    return [
+        {
+            "item_name": i.item_name,
+            "code": i.code,
+            "quantity": i.quantity,
+            "remaining_quantity": i.remaining_quantity,
+        }
+        for i in note.items.all()
+    ]
+
+
+def _check_and_notify_all_warehouse_expiry() -> int:
+    """Scan all active storage notes and email those that have expired. Returns count sent."""
+    sent_count = 0
+    notes = (
+        WarehouseStorageNote.objects.filter(is_active=True, status__in=["active", "expired"])
+        .prefetch_related("items", "expiration_fee_tiers", "top_ups")
+        .all()
+    )
+    for note in notes:
+        exp = _compute_expiration(note)
+        if not exp["expired"]:
+            continue
+        # Persist the expired status for downstream reporting/UI.
+        if note.status != "expired":
+            WarehouseStorageNote.objects.filter(pk=note.pk).update(status="expired")
+        if _check_and_notify_warehouse_expiry(note):
+            sent_count += 1
+    return sent_count
+
+
+@router.post("/warehouse-storage-notes", response=WarehouseStorageNoteDetailSchema)
+def create_warehouse_storage_note(request, payload: WarehouseStorageNoteCreatePayloadSchema):
+    if WarehouseStorageNote.objects.filter(wsn_no=payload.wsn_no).exists():
+        return JsonResponse(
+            {"detail": f"Warehouse storage note '{payload.wsn_no}' already exists."},
+            status=400,
+        )
+    note = WarehouseStorageNote.objects.create(
+        wsn_no=payload.wsn_no,
+        customer_name=payload.customer_name,
+        date=payload.date,
+        ECD_no=payload.ECD_no,
+        remark=payload.remark,
+        storage_period_value=payload.storage_period_value,
+        storage_period_unit=payload.storage_period_unit,
+        storage_price=payload.storage_price,
+        grace_period_value=payload.grace_period_value,
+        grace_period_unit=payload.grace_period_unit,
+    )
+    seen_tiers = set()
+    for tier in payload.expiration_fee_tiers or []:
+        if tier.tier_index in seen_tiers:
+            continue
+        seen_tiers.add(tier.tier_index)
+        ExpirationFeeTier.objects.create(
+            storage_note=note,
+            tier_index=tier.tier_index,
+            period_value=tier.period_value,
+            period_unit=tier.period_unit,
+            fee_amount=tier.fee_amount,
+        )
+    for item in payload.items:
+        WarehouseStorageItem.objects.create(
+            item_id=item.item_id or uuid.uuid4(),
+            storage_note=note,
+            wsn_no=note.wsn_no,
+            item_name=item.item_name,
+            code=item.code,
+            quantity=item.quantity,
+            unit_measurement=item.unit_measurement,
+            internal_code=item.internal_code,
+            bags=item.bags,
+            remaining_quantity=item.quantity,
+        )
+    note.refresh_from_db()
+    return _storage_note_to_schema(note)
+
+
+@router.get("/warehouse-storage-notes", response=list[WarehouseStorageNoteDetailSchema])
+def list_warehouse_storage_notes(request):
+    notes = WarehouseStorageNote.objects.prefetch_related(
+        "items", "expiration_fee_tiers", "top_ups"
+    ).all()
+    return [_storage_note_to_schema(n) for n in notes]
+
+
+@router.get("/warehouse-storage-notes/{note_id}", response=WarehouseStorageNoteDetailSchema)
+def get_warehouse_storage_note(request, note_id: uuid.UUID):
+    note = get_object_or_404(
+        WarehouseStorageNote.objects.prefetch_related(
+            "items", "expiration_fee_tiers", "top_ups"
+        ),
+        id=note_id,
+    )
+    return _storage_note_to_schema(note)
+
+
+@router.put("/warehouse-storage-notes/{note_id}", response=WarehouseStorageNoteDetailSchema, auth=JWTAuth())
+def update_warehouse_storage_note(
+    request, note_id: uuid.UUID, payload: WarehouseStorageNoteUpdateSchema
+):
+    note = get_object_or_404(WarehouseStorageNote, id=note_id)
+    if payload.storage_period_unit not in (None, *_PERIOD_UNITS):
+        return JsonResponse({"detail": "Invalid period unit."}, status=400)
+    if payload.grace_period_unit not in (None, *_PERIOD_UNITS):
+        return JsonResponse({"detail": "Invalid grace period unit."}, status=400)
+    for field in (
+        "customer_name",
+        "ECD_no",
+        "remark",
+        "storage_period_value",
+        "storage_period_unit",
+        "storage_price",
+        "grace_period_value",
+        "grace_period_unit",
+    ):
+        val = getattr(payload, field, None)
+        if val is not None:
+            setattr(note, field, val)
+    note.save()
+    note.refresh_from_db()
+    return _storage_note_to_schema(note)
+
+
+@router.delete("/warehouse-storage-notes/{note_id}", auth=JWTAuth())
+def delete_warehouse_storage_note(request, note_id: uuid.UUID):
+    note = get_object_or_404(WarehouseStorageNote, id=note_id)
+    note.delete()
+    return {"detail": "Warehouse storage note deleted successfully."}
+
+
+@router.post(
+    "/warehouse-storage-notes/{note_id}/top-up",
+    response=WarehouseStorageNoteDetailSchema,
+    auth=JWTAuth(),
+)
+def warehouse_storage_top_up(request, note_id: uuid.UUID, payload: WarehouseStorageTopUpCreateSchema):
+    note = get_object_or_404(
+        WarehouseStorageNote.objects.prefetch_related(
+            "items", "expiration_fee_tiers", "top_ups"
+        ),
+        id=note_id,
+    )
+    exp = _compute_expiration(note)
+    if exp["expired"]:
+        return JsonResponse(
+            {
+                "detail": (
+                    "This storage note has already expired. Expired storage cannot be "
+                    "topped up; contact the warehouse team."
+                )
+            },
+            status=400,
+        )
+    if payload.additional_period_unit not in _PERIOD_UNITS:
+        return JsonResponse({"detail": "Invalid period unit."}, status=400)
+    WarehouseStorageTopUp.objects.create(
+        storage_note=note,
+        top_up_date=payload.top_up_date,
+        additional_period_value=payload.additional_period_value,
+        additional_period_unit=payload.additional_period_unit,
+        price=payload.price,
+        remark=payload.remark,
+    )
+    note.refresh_from_db()
+    return _storage_note_to_schema(note)
+
+
+@router.post("/warehouse-release-notes", response=WarehouseReleaseNoteDetailSchema)
+def create_warehouse_release_note(request, payload: WarehouseReleaseNoteCreateSchema):
+    storage_note = get_object_or_404(
+        WarehouseStorageNote.objects.prefetch_related("items"),
+        id=payload.storage_note_id,
+    )
+    if WarehouseReleaseNote.objects.filter(wrn_no=payload.wrn_no).exists():
+        return JsonResponse(
+            {"detail": f"Warehouse release note '{payload.wrn_no}' already exists."},
+            status=400,
+        )
+    if not payload.items:
+        return JsonResponse({"detail": "A release note must have at least one item."}, status=400)
+
+    storage_items = {i.id: i for i in storage_note.items.all()}
+    release_note = WarehouseReleaseNote.objects.create(
+        wrn_no=payload.wrn_no,
+        storage_note=storage_note,
+        customer_name=payload.customer_name,
+        date=payload.date,
+        remark=payload.remark,
+    )
+
+    # First pass: validate all requested quantities against remaining stock.
+    for item in payload.items:
+        storage_item = storage_items.get(item.storage_item_id)
+        if storage_item is None:
+            release_note.delete()
+            return JsonResponse(
+                {"detail": f"Storage item not found for '{item.item_name}'."}, status=400
+            )
+        if item.quantity <= 0:
+            release_note.delete()
+            return JsonResponse(
+                {"detail": "Release quantity must be greater than zero."}, status=400
+            )
+        if item.quantity > (storage_item.remaining_quantity or 0):
+            release_note.delete()
+            return JsonResponse(
+                {
+                    "detail": (
+                        f"Cannot release {item.quantity} of '{item.item_name}'; only "
+                        f"{storage_item.remaining_quantity or 0} remain in storage."
+                    )
+                },
+                status=400,
+            )
+
+    # Second pass: create release items and decrement storage remaining quantities.
+    for item in payload.items:
+        storage_item = storage_items[item.storage_item_id]
+        WarehouseReleaseItem.objects.create(
+            item_id=item.item_id or uuid.uuid4(),
+            release_note=release_note,
+            storage_item=storage_item,
+            wrn_no=release_note.wrn_no,
+            item_name=item.item_name,
+            code=item.code,
+            quantity=item.quantity,
+            unit_measurement=item.unit_measurement,
+            internal_code=item.internal_code,
+            bags=item.bags,
+        )
+        updated = (storage_item.remaining_quantity or 0) - item.quantity
+        WarehouseStorageItem.objects.filter(pk=storage_item.pk).update(
+            remaining_quantity=max(updated, 0)
+        )
+
+    # If nothing remains in storage, mark the storage note as released.
+    total_remaining = (
+        storage_note.items.aggregate(total=Sum("remaining_quantity"))["total"] or 0
+    )
+    if total_remaining <= 0:
+        WarehouseStorageNote.objects.filter(pk=storage_note.pk).update(
+            status="released", is_active=False
+        )
+    release_note.refresh_from_db()
+    return _release_note_to_schema(release_note)
+
+
+def _release_note_to_schema(note) -> dict:
+    return {
+        "id": note.id,
+        "wrn_no": note.wrn_no,
+        "storage_note_id": note.storage_note_id,
+        "wsn_no": note.storage_note.wsn_no,
+        "customer_name": note.customer_name,
+        "date": note.date,
+        "remark": note.remark,
+        "items": [
+            {
+                "item_id": i.item_id,
+                "item_name": i.item_name,
+                "code": i.code,
+                "quantity": i.quantity,
+                "unit_measurement": i.unit_measurement,
+                "internal_code": i.internal_code,
+                "bags": i.bags,
+            }
+            for i in note.items.all()
+        ],
+    }
+
+
+@router.get("/warehouse-release-notes", response=list[WarehouseReleaseNoteDetailSchema])
+def list_warehouse_release_notes(request):
+    notes = WarehouseReleaseNote.objects.prefetch_related("items", "storage_note").all()
+    return [_release_note_to_schema(n) for n in notes]
+
+
+@router.get("/warehouse-release-notes/{note_id}", response=WarehouseReleaseNoteDetailSchema)
+def get_warehouse_release_note(request, note_id: uuid.UUID):
+    note = get_object_or_404(
+        WarehouseReleaseNote.objects.prefetch_related("items", "storage_note"), id=note_id
+    )
+    return _release_note_to_schema(note)
+
+
+@router.get("/warehouse-expiry-check", auth=JWTAuth())
+def warehouse_expiry_check(request):
+    """(Re)run the expiration scan and send notifications for any newly-expired storage notes."""
+    sent = _check_and_notify_all_warehouse_expiry()
+    return {"checked": True, "notifications_sent": sent}
 

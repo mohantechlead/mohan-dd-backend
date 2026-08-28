@@ -749,3 +749,151 @@ class ShippingInvoiceDetailSchema(Schema):
     authorized_by: Optional[str] = None
     authorized_at: Optional[str] = None
     items: List[ShippingInvoiceItemSchema]
+
+
+# ============================================================
+# In-Warehouse storage (WSN / WRN)
+# ============================================================
+
+class WarehouseStorageItemCreateSchema(Schema):
+    item_id: Optional[uuid.UUID] = None
+    code: Optional[str] = None
+    item_name: str
+    quantity: float
+    unit_measurement: str
+    bags: Optional[float] = None
+    internal_code: Optional[str] = None
+
+
+class ExpirationFeeTierCreateSchema(Schema):
+    tier_index: int
+    period_value: Optional[int] = 1
+    period_unit: Optional[str] = "months"
+    fee_amount: float
+
+
+class WarehouseStorageNoteCreatePayloadSchema(Schema):
+    wsn_no: str
+    customer_name: str
+    date: date
+    ECD_no: Optional[str] = None
+    remark: Optional[str] = None
+    storage_period_value: Optional[int] = 1
+    storage_period_unit: Optional[str] = "months"
+    storage_price: Optional[float] = 0
+    grace_period_value: Optional[int] = 0
+    grace_period_unit: Optional[str] = "days"
+    items: List[WarehouseStorageItemCreateSchema]
+    expiration_fee_tiers: List[ExpirationFeeTierCreateSchema]
+
+
+class ExpirationFeeTierSchema(Schema):
+    id: int
+    tier_index: int
+    period_value: int
+    period_unit: str
+    fee_amount: float
+
+
+class WarehouseStorageItemSchema(Schema):
+    item_id: uuid.UUID
+    item_name: str
+    code: Optional[str] = None
+    quantity: float
+    unit_measurement: str
+    internal_code: Optional[str] = None
+    bags: Optional[float] = None
+    remaining_quantity: float
+
+
+class WarehouseStorageTopUpCreateSchema(Schema):
+    top_up_date: date
+    additional_period_value: int
+    additional_period_unit: Optional[str] = "months"
+    price: Optional[float] = 0
+    remark: Optional[str] = None
+
+
+class WarehouseStorageTopUpSchema(Schema):
+    id: int
+    top_up_date: date
+    additional_period_value: int
+    additional_period_unit: str
+    price: float
+    remark: Optional[str] = None
+
+
+class WarehouseStorageNoteDetailSchema(Schema):
+    id: uuid.UUID
+    wsn_no: str
+    customer_name: str
+    date: date
+    ECD_no: Optional[str] = None
+    remark: Optional[str] = None
+    storage_period_value: int
+    storage_period_unit: str
+    storage_price: float
+    grace_period_value: int
+    grace_period_unit: str
+    status: str
+    is_active: bool
+    storage_expiry_date: Optional[date] = None
+    current_expiry_date: Optional[date] = None
+    expired: bool = False
+    periods_expired: int = 0
+    current_expiration_fee: Optional[float] = None
+    items: List[WarehouseStorageItemSchema]
+    expiration_fee_tiers: List[ExpirationFeeTierSchema]
+    top_ups: List[WarehouseStorageTopUpSchema]
+
+
+class WarehouseStorageNoteUpdateSchema(Schema):
+    customer_name: Optional[str] = None
+    ECD_no: Optional[str] = None
+    remark: Optional[str] = None
+    storage_period_value: Optional[int] = None
+    storage_period_unit: Optional[str] = None
+    storage_price: Optional[float] = None
+    grace_period_value: Optional[int] = None
+    grace_period_unit: Optional[str] = None
+
+
+class WarehouseReleaseItemCreateSchema(Schema):
+    item_id: Optional[uuid.UUID] = None
+    storage_item_id: Optional[int] = None
+    code: Optional[str] = None
+    item_name: str
+    quantity: float
+    unit_measurement: str
+    bags: Optional[float] = None
+    internal_code: Optional[str] = None
+
+
+class WarehouseReleaseNoteCreateSchema(Schema):
+    wrn_no: str
+    storage_note_id: uuid.UUID
+    customer_name: str
+    date: date
+    remark: Optional[str] = None
+    items: List[WarehouseReleaseItemCreateSchema]
+
+
+class WarehouseReleaseItemSchema(Schema):
+    item_id: uuid.UUID
+    item_name: str
+    code: Optional[str] = None
+    quantity: float
+    unit_measurement: str
+    internal_code: Optional[str] = None
+    bags: Optional[float] = None
+
+
+class WarehouseReleaseNoteDetailSchema(Schema):
+    id: uuid.UUID
+    wrn_no: str
+    storage_note_id: uuid.UUID
+    wsn_no: Optional[str] = None
+    customer_name: str
+    date: date
+    remark: Optional[str] = None
+    items: List[WarehouseReleaseItemSchema]

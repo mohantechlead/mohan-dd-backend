@@ -242,6 +242,17 @@ OVER_UNDER_DELIVERY_RECIPIENTS = [
     if r.strip()
 ]
 
+# Recipients for warehouse storage expiry notifications (comma-separated emails).
+# Falls back to NOTIFICATION_EMAIL_RECIPIENTS when unset.
+WAREHOUSE_EXPIRATION_RECIPIENTS = [
+    r.strip()
+    for r in os.environ.get(
+        "WAREHOUSE_EXPIRATION_RECIPIENTS",
+        ",".join(NOTIFICATION_EMAIL_RECIPIENTS),
+    ).split(",")
+    if r.strip()
+]
+
 # For testing: set EMAIL_BACKEND=django.core.mail.backends.console.EmailBackend
 # to print emails to console instead of sending
 

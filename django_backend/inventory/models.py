@@ -231,9 +231,9 @@ class ShippingInvoiceItem(models.Model):
     item_name = models.CharField(max_length=255)
     code = models.CharField(max_length=100, blank=True, null=True, db_index=True)
     notes = models.TextField(blank=True, null=True)
-    price = models.DecimalField(max_digits=12, decimal_places=2)
+    price = models.DecimalField(max_digits=12, decimal_places=3)
     quantity = models.FloatField()
-    total_price = models.DecimalField(max_digits=12, decimal_places=2)
+    total_price = models.DecimalField(max_digits=12, decimal_places=3)
     measurement = models.CharField(max_length=100)
     package = models.FloatField(blank=True, null=True)
     drums = models.FloatField(blank=True, null=True)
@@ -346,3 +346,173 @@ class PurchaseItem(models.Model):
 
     def __str__(self):
         return f"{self.purchase.purchase_number} - {self.item_name}"
+
+
+# ============================================================
+# In-Warehouse storage (third-party product warehousing business)
+# ============================================================
+
+class WarehouseStorageNote(models.Model):
+    """Header document (WSN) recording products received into our warehouse for storage."""
+    id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True, primary_key=True)
+    wsn_no = models.CharField(max_length=255, unique=True)
+    customer_name = models.CharField(max_length=255)
+    # Storage start / received date. The contract storage period is measured from this date.
+    date = models.DateField(null=False, blank=False)
+    ECD_no = models.CharField(max_length=255, blank=True, null=True)
+    remark = models.TextField(blank=True, null=True)
+
+    # Contract storage period: the paid period for which storage_price applies.
+    storage_period_value = models.PositiveIntegerField(default=1)
+    storage_period_unit = models.CharField(
+        max_length=10,
+        choices=[("days", "days"), ("weeks", "weeks"), ("months", "months")],
+        default="months",
+    )
+    # Base price charged for the contracted storage period.
+    storage_price = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+
+    # Expire-after period: grace interval that follows the storage period before the
+    # tiered expiration-fee schedule begins. Kept flexible (days/weeks/months).
+    grace_period_value = models.PositiveIntegerField(default=0)
+    grace_period_unit = models.CharField(
+        max_length=10,
+        choices=[("days", "days"), ("weeks", "weeks"), ("months", "months")],
+        default="days",
+    )
+
+    # active | expired | released
+    status = models.CharField(max_length=20, default="active")
+    is_active = models.BooleanField(default=True)
+
+    # Expiry notification dedup: we only re-notify when the note first expires and
+    # whenever the applicable expiration-fee tier escalates.
+    expiry_notified = models.BooleanField(default=False)
+    last_notified_tier = models.PositiveIntegerField(null=True, blank=True)
+    last_notified_at = models.DateTimeField(null=True, blank=True)
+
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.wsn_no} ({self.customer_name})"
+
+    class Meta:
+        ordering = ["-date", "wsn_no"]
+
+
+class WarehouseStorageItem(models.Model):
+    item_id = models.UUIDField(default=uuid.uuid4, editable=False)
+    storage_note = models.ForeignKey(
+        WarehouseStorageNote, on_delete=models.CASCADE, related_name="items"
+    )
+    wsn_no = models.CharField(max_length=255, blank=True, null=True, db_index=True)
+    item_name = models.CharField(max_length=255)
+    code = models.CharField(max_length=100, blank=True, null=True, db_index=True)
+    quantity = models.FloatField()
+    unit_measurement = models.CharField(max_length=100)
+    internal_code = models.CharField(max_length=100, blank=True, null=True)
+    bags = models.FloatField(blank=True, null=True)
+    # Quantity still held in storage (reduced by releases).
+    remaining_quantity = models.FloatField(default=0)
+
+    def __str__(self):
+        return f"{self.storage_note} - {self.item_name}"
+
+    class Meta:
+        ordering = ["storage_note"]
+
+
+class ExpirationFeeTier(models.Model):
+    """Tiered expiration-fee schedule for a storage note (e.g. 1st month $10, 2nd+ $30)."""
+    id = models.BigAutoField(primary_key=True, editable=False)
+    storage_note = models.ForeignKey(
+        WarehouseStorageNote,
+        on_delete=models.CASCADE,
+        related_name="expiration_fee_tiers",
+    )
+    # 1 = first billing interval after expiry, 2 = second, etc.
+    tier_index = models.PositiveIntegerField()
+    period_value = models.PositiveIntegerField(default=1)
+    period_unit = models.CharField(
+        max_length=10,
+        choices=[("days", "days"), ("weeks", "weeks"), ("months", "months")],
+        default="months",
+    )
+    fee_amount = models.DecimalField(max_digits=12, decimal_places=2)
+
+    class Meta:
+        ordering = ["tier_index"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["storage_note", "tier_index"], name="uniq_exp_fee_storage_tier"
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.storage_note} - tier {self.tier_index}: {self.fee_amount}"
+
+
+class WarehouseStorageTopUp(models.Model):
+    """Extends a storage note's period before it expires (pre-expiry top-up)."""
+    id = models.BigAutoField(primary_key=True, editable=False)
+    storage_note = models.ForeignKey(
+        WarehouseStorageNote, on_delete=models.CASCADE, related_name="top_ups"
+    )
+    top_up_date = models.DateField(null=False, blank=False)
+    additional_period_value = models.PositiveIntegerField()
+    additional_period_unit = models.CharField(
+        max_length=10,
+        choices=[("days", "days"), ("weeks", "weeks"), ("months", "months")],
+        default="months",
+    )
+    price = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    remark = models.TextField(blank=True, null=True)
+
+    def __str__(self):
+        return f"{self.storage_note} +{self.additional_period_value} {self.additional_period_unit}"
+
+
+class WarehouseReleaseNote(models.Model):
+    """Outbound document (WRN) recording products released from storage back to the client."""
+    id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True, primary_key=True)
+    wrn_no = models.CharField(max_length=255, unique=True)
+    storage_note = models.ForeignKey(
+        WarehouseStorageNote, on_delete=models.CASCADE, related_name="release_notes"
+    )
+    customer_name = models.CharField(max_length=255)
+    date = models.DateField(null=False, blank=False)
+    remark = models.TextField(blank=True, null=True)
+
+    def __str__(self):
+        return f"{self.wrn_no} ({self.customer_name})"
+
+    class Meta:
+        ordering = ["-date", "wrn_no"]
+
+
+class WarehouseReleaseItem(models.Model):
+    item_id = models.UUIDField(default=uuid.uuid4, editable=False)
+    release_note = models.ForeignKey(
+        WarehouseReleaseNote, on_delete=models.CASCADE, related_name="items"
+    )
+    storage_item = models.ForeignKey(
+        WarehouseStorageItem,
+        on_delete=models.CASCADE,
+        related_name="release_items",
+        null=True,
+        blank=True,
+    )
+    wrn_no = models.CharField(max_length=255, blank=True, null=True, db_index=True)
+    item_name = models.CharField(max_length=255)
+    code = models.CharField(max_length=100, blank=True, null=True, db_index=True)
+    quantity = models.FloatField()
+    unit_measurement = models.CharField(max_length=100)
+    internal_code = models.CharField(max_length=100, blank=True, null=True)
+    bags = models.FloatField(blank=True, null=True)
+
+    def __str__(self):
+        return f"{self.release_note} - {self.item_name}"
+
+    class Meta:
+        ordering = ["release_note"]
