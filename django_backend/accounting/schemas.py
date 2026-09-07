@@ -161,3 +161,58 @@ class ReceivedPaymentDetailSchema(Schema):
     remaining_amount: float
     payment_completion_status: str
     remark: Optional[str] = None
+
+
+# ============================================================
+# Warehouse Storage Payments
+# ============================================================
+
+class WarehouseStoragePaymentCreateSchema(Schema):
+    payment_date: date
+    wsn_no: str
+    payment_type: str  # partial | full
+    amount: Optional[float] = None
+    remark: Optional[str] = None
+
+
+class WarehouseStoragePaymentUpdateSchema(Schema):
+    payment_date: date
+    payment_type: str  # partial | full
+    amount: Optional[float] = None
+    remark: Optional[str] = None
+
+
+class WarehouseStoragePaymentApproveSchema(Schema):
+    approved_by_id: int
+
+
+class WarehouseStoragePaymentStatusUpdateSchema(Schema):
+    status: str  # completed | cancelled
+    user_id: int
+    reference_number: Optional[str] = None
+    remark: Optional[str] = None
+
+
+class WarehouseStoragePaymentDetailSchema(Schema):
+    id: uuid.UUID
+    payment_number: str
+    installment_number: int
+    payment_date: date
+    wsn_no: str
+    customer_name: str
+    payment_type: str
+    amount: float
+    status: str
+    approved_by: Optional[str] = None
+    approval_date: Optional[str] = None
+    completed_by: Optional[str] = None
+    completed_date: Optional[str] = None
+    cancelled_by: Optional[str] = None
+    cancelled_date: Optional[str] = None
+    reference_number: Optional[str] = None
+    status_remark: Optional[str] = None
+    storage_price: float
+    total_paid: float
+    remaining_amount: float
+    payment_completion_status: str
+    remark: Optional[str] = None

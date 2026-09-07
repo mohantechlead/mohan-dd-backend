@@ -357,7 +357,7 @@ class WarehouseStorageNote(models.Model):
     id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True, primary_key=True)
     wsn_no = models.CharField(max_length=255, unique=True)
     customer_name = models.CharField(max_length=255)
-    # Storage start / received date. The contract storage period is measured from this date.
+    # Contract/agreement date. The storage period is measured from this date.
     date = models.DateField(null=False, blank=False)
     ECD_no = models.CharField(max_length=255, blank=True, null=True)
     remark = models.TextField(blank=True, null=True)
@@ -370,7 +370,17 @@ class WarehouseStorageNote(models.Model):
         default="months",
     )
     # Base price charged for the contracted storage period.
+    # Set separately by accounting via the price endpoint, not at creation time.
     storage_price = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    # Audit trail for price entry (set by accounting)
+    price_entered_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="set_storage_prices",
+    )
+    price_entered_at = models.DateTimeField(null=True, blank=True)
 
     # Expire-after period: grace interval that follows the storage period before the
     # tiered expiration-fee schedule begins. Kept flexible (days/weeks/months).
@@ -421,6 +431,44 @@ class WarehouseStorageItem(models.Model):
 
     class Meta:
         ordering = ["storage_note"]
+
+
+class WarehouseStorageEntry(models.Model):
+    """Records a physical delivery of items into storage (one of potentially many entries per WSN).
+
+    Each entry captures a batch of items that arrived on a specific date, enabling
+    flexible partial deliveries (e.g. 50 items today, 50 items next week).
+    """
+    id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True, primary_key=True)
+    storage_note = models.ForeignKey(
+        WarehouseStorageNote, on_delete=models.CASCADE, related_name="entries"
+    )
+    entry_date = models.DateField()
+    remark = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Entry {self.id} for {self.storage_note.wsn_no} ({self.entry_date})"
+
+    class Meta:
+        ordering = ["entry_date", "created_at"]
+
+
+class WarehouseStorageEntryItem(models.Model):
+    """Items delivered in a single entry batch."""
+    id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True, primary_key=True)
+    entry = models.ForeignKey(
+        WarehouseStorageEntry, on_delete=models.CASCADE, related_name="items"
+    )
+    storage_item = models.ForeignKey(
+        WarehouseStorageItem, on_delete=models.CASCADE, related_name="entry_items"
+    )
+    quantity = models.FloatField()
+    bags = models.FloatField(blank=True, null=True)
+
+    def __str__(self):
+        return f"Entry item for {self.entry} - qty {self.quantity}"
 
 
 class ExpirationFeeTier(models.Model):

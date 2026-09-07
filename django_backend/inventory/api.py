@@ -79,6 +79,8 @@ from .models import (
     WarehouseStorageTopUp,
     WarehouseReleaseNote,
     WarehouseReleaseItem,
+    WarehouseStorageEntry,
+    WarehouseStorageEntryItem,
 )
 from .schemas import (
     GrnCreateSchema,
@@ -133,6 +135,16 @@ from .schemas import (
     WarehouseReleaseNoteCreateSchema,
     WarehouseReleaseItemSchema,
     WarehouseReleaseNoteDetailSchema,
+    WarehouseStorageEntryCreateSchema,
+    WarehouseStorageEntrySchema,
+    WarehouseStorageEntryItemSchema,
+    WarehouseStoragePriceSetSchema,
+    WarehouseItemFlowSchema,
+    WarehouseItemFlowEntrySchema,
+    WarehouseItemFlowReleaseSchema,
+    WarehouseItemFlowPaymentSchema,
+    WarehouseItemInventorySchema,
+    WarehouseItemInventoryNoteSchema,
 )
 import uuid
 from django.http import JsonResponse
@@ -235,6 +247,41 @@ def _next_mpddfze_purchase_number(values) -> str:
         return "MPDDFZE001"
     next_n = max_n + 1
     return "MPDDFZE{0:03d}".format(next_n)
+
+
+_WS_NUMBER_RE = re.compile(r"^(?:WSN|WRN)-?(\d+)$", re.IGNORECASE)
+
+
+def _next_wsn_number() -> str:
+    """Next sequential WSN number after the max existing (default WSN-001)."""
+    values = WarehouseStorageNote.objects.values_list("wsn_no", flat=True)
+    max_n = None
+    for val in values:
+        if val is None:
+            continue
+        m = _WS_NUMBER_RE.match(str(val).strip())
+        if m:
+            n = int(m.group(1))
+            max_n = n if max_n is None else max(max_n, n)
+    if max_n is None:
+        return "WSN-001"
+    return "WSN-{0:03d}".format(max_n + 1)
+
+
+def _next_wrn_number() -> str:
+    """Next sequential WRN number after the max existing (default WRN-001)."""
+    values = WarehouseReleaseNote.objects.values_list("wrn_no", flat=True)
+    max_n = None
+    for val in values:
+        if val is None:
+            continue
+        m = _WS_NUMBER_RE.match(str(val).strip())
+        if m:
+            n = int(m.group(1))
+            max_n = n if max_n is None else max(max_n, n)
+    if max_n is None:
+        return "WRN-001"
+    return "WRN-{0:03d}".format(max_n + 1)
 
 
 def _require_admin(request):
@@ -3824,7 +3871,26 @@ def _compute_expiration(note, as_of: date_type | None = None) -> dict:
 
 
 def _storage_note_to_schema(note) -> dict:
+    from accounting.models import WarehouseStoragePayment
+
     exp = _compute_expiration(note)
+
+    # Compute entry totals
+    total_entry_qty = sum(
+        ei.quantity
+        for entry in note.entries.all()
+        for ei in entry.items.all()
+    )
+
+    # Compute payment totals
+    completed_payments = WarehouseStoragePayment.objects.filter(
+        storage_note=note,
+        status__in=("approved", "completed"),
+    )
+    total_paid = sum(Decimal(str(p.amount or 0)) for p in completed_payments)
+    storage_price = Decimal(str(note.storage_price or 0))
+    payment_remaining = max(storage_price - total_paid, Decimal("0"))
+
     return {
         "id": note.id,
         "wsn_no": note.wsn_no,
@@ -3835,6 +3901,8 @@ def _storage_note_to_schema(note) -> dict:
         "storage_period_value": note.storage_period_value,
         "storage_period_unit": note.storage_period_unit,
         "storage_price": float(note.storage_price),
+        "price_entered_by": note.price_entered_by.username if note.price_entered_by else None,
+        "price_entered_at": note.price_entered_at.isoformat() if note.price_entered_at else None,
         "grace_period_value": note.grace_period_value,
         "grace_period_unit": note.grace_period_unit,
         "status": note.status,
@@ -3878,6 +3946,29 @@ def _storage_note_to_schema(note) -> dict:
             }
             for t in note.top_ups.all()
         ],
+        "entries": [
+            {
+                "id": e.id,
+                "entry_date": e.entry_date,
+                "remark": e.remark,
+                "items": [
+                    {
+                        "id": ei.id,
+                        "storage_item_id": ei.storage_item_id,
+                        "item_name": ei.storage_item.item_name,
+                        "code": ei.storage_item.code,
+                        "quantity": ei.quantity,
+                        "bags": ei.bags,
+                    }
+                    for ei in e.items.all()
+                ],
+                "created_at": e.created_at.isoformat() if e.created_at else None,
+            }
+            for e in note.entries.all()
+        ],
+        "total_entry_quantity": total_entry_qty,
+        "total_paid": float(total_paid),
+        "payment_remaining": float(payment_remaining),
     }
 
 
@@ -4065,13 +4156,14 @@ def _check_and_notify_all_warehouse_expiry() -> int:
 
 @router.post("/warehouse-storage-notes", response=WarehouseStorageNoteDetailSchema)
 def create_warehouse_storage_note(request, payload: WarehouseStorageNoteCreatePayloadSchema):
-    if WarehouseStorageNote.objects.filter(wsn_no=payload.wsn_no).exists():
+    wsn_no = (payload.wsn_no or "").strip() or _next_wsn_number()
+    if WarehouseStorageNote.objects.filter(wsn_no=wsn_no).exists():
         return JsonResponse(
-            {"detail": f"Warehouse storage note '{payload.wsn_no}' already exists."},
+            {"detail": f"Warehouse storage note '{wsn_no}' already exists."},
             status=400,
         )
     note = WarehouseStorageNote.objects.create(
-        wsn_no=payload.wsn_no,
+        wsn_no=wsn_no,
         customer_name=payload.customer_name,
         date=payload.date,
         ECD_no=payload.ECD_no,
@@ -4111,10 +4203,17 @@ def create_warehouse_storage_note(request, payload: WarehouseStorageNoteCreatePa
     return _storage_note_to_schema(note)
 
 
+@router.get("/warehouse-storage-notes/next-number")
+def next_warehouse_storage_note_number(request):
+    """Suggest the next auto-generated Warehouse Storage Note number (WSN-###)."""
+    return {"next_number": _next_wsn_number()}
+
+
 @router.get("/warehouse-storage-notes", response=list[WarehouseStorageNoteDetailSchema])
 def list_warehouse_storage_notes(request):
     notes = WarehouseStorageNote.objects.prefetch_related(
-        "items", "expiration_fee_tiers", "top_ups"
+        "items", "expiration_fee_tiers", "top_ups",
+        "entries__items__storage_item",
     ).all()
     return [_storage_note_to_schema(n) for n in notes]
 
@@ -4207,9 +4306,10 @@ def create_warehouse_release_note(request, payload: WarehouseReleaseNoteCreateSc
         WarehouseStorageNote.objects.prefetch_related("items"),
         id=payload.storage_note_id,
     )
-    if WarehouseReleaseNote.objects.filter(wrn_no=payload.wrn_no).exists():
+    wrn_no = (payload.wrn_no or "").strip() or _next_wrn_number()
+    if WarehouseReleaseNote.objects.filter(wrn_no=wrn_no).exists():
         return JsonResponse(
-            {"detail": f"Warehouse release note '{payload.wrn_no}' already exists."},
+            {"detail": f"Warehouse release note '{wrn_no}' already exists."},
             status=400,
         )
     if not payload.items:
@@ -4217,7 +4317,7 @@ def create_warehouse_release_note(request, payload: WarehouseReleaseNoteCreateSc
 
     storage_items = {i.id: i for i in storage_note.items.all()}
     release_note = WarehouseReleaseNote.objects.create(
-        wrn_no=payload.wrn_no,
+        wrn_no=wrn_no,
         storage_note=storage_note,
         customer_name=payload.customer_name,
         date=payload.date,
@@ -4305,6 +4405,12 @@ def _release_note_to_schema(note) -> dict:
     }
 
 
+@router.get("/warehouse-release-notes/next-number")
+def next_warehouse_release_note_number(request):
+    """Suggest the next auto-generated Warehouse Release Note number (WRN-###)."""
+    return {"next_number": _next_wrn_number()}
+
+
 @router.get("/warehouse-release-notes", response=list[WarehouseReleaseNoteDetailSchema])
 def list_warehouse_release_notes(request):
     notes = WarehouseReleaseNote.objects.prefetch_related("items", "storage_note").all()
@@ -4317,6 +4423,363 @@ def get_warehouse_release_note(request, note_id: uuid.UUID):
         WarehouseReleaseNote.objects.prefetch_related("items", "storage_note"), id=note_id
     )
     return _release_note_to_schema(note)
+
+
+# ============================================================
+# Warehouse Storage Entries (flexible partial deliveries)
+# ============================================================
+
+@router.post(
+    "/warehouse-storage-notes/{note_id}/entries",
+    response=WarehouseStorageEntrySchema,
+    auth=JWTAuth(),
+)
+def create_warehouse_storage_entry(request, note_id: uuid.UUID, payload: WarehouseStorageEntryCreateSchema):
+    """Create a delivery entry for a storage note. Increments remaining_quantity on each item."""
+    note = get_object_or_404(
+        WarehouseStorageNote.objects.prefetch_related("items"),
+        id=note_id,
+    )
+    if not payload.items:
+        return JsonResponse({"detail": "An entry must have at least one item."}, status=400)
+
+    storage_items = {i.id: i for i in note.items.all()}
+
+    # Validate all items belong to this WSN and quantities are valid
+    for item in payload.items:
+        storage_item = storage_items.get(item.storage_item_id)
+        if storage_item is None:
+            return JsonResponse(
+                {"detail": f"Storage item {item.storage_item_id} not found in this WSN."},
+                status=400,
+            )
+        if item.quantity <= 0:
+            return JsonResponse(
+                {"detail": "Entry quantity must be greater than zero."},
+                status=400,
+            )
+        # Check that entering this quantity won't exceed total agreed quantity
+        current_total_entered = sum(
+            ei.quantity
+            for e in storage_item.storage_note.entries.all()
+            for ei in e.items.filter(storage_item=storage_item)
+        )
+        if current_total_entered + item.quantity > storage_item.quantity:
+            return JsonResponse(
+                {
+                    "detail": (
+                        f"Cannot enter {item.quantity} of '{storage_item.item_name}'; "
+                        f"total agreed is {storage_item.quantity}, already entered {current_total_entered}."
+                    )
+                },
+                status=400,
+            )
+
+    # Create the entry
+    entry = WarehouseStorageEntry.objects.create(
+        storage_note=note,
+        entry_date=payload.entry_date,
+        remark=payload.remark,
+    )
+
+    # Create entry items and update remaining_quantity
+    for item in payload.items:
+        storage_item = storage_items[item.storage_item_id]
+        WarehouseStorageEntryItem.objects.create(
+            entry=entry,
+            storage_item=storage_item,
+            quantity=item.quantity,
+            bags=item.bags,
+        )
+        # Increment remaining_quantity
+        WarehouseStorageItem.objects.filter(pk=storage_item.pk).update(
+            remaining_quantity=(storage_item.remaining_quantity or 0) + item.quantity
+        )
+
+    entry.refresh_from_db()
+    return _entry_to_schema(entry)
+
+
+@router.get(
+    "/warehouse-storage-notes/{note_id}/entries",
+    response=list[WarehouseStorageEntrySchema],
+)
+def list_warehouse_storage_entries(request, note_id: uuid.UUID):
+    """List all delivery entries for a storage note."""
+    note = get_object_or_404(WarehouseStorageNote, id=note_id)
+    entries = note.entries.prefetch_related("items__storage_item").all()
+    return [_entry_to_schema(e) for e in entries]
+
+
+@router.get(
+    "/warehouse-storage-notes/{note_id}/entries/{entry_id}",
+    response=WarehouseStorageEntrySchema,
+)
+def get_warehouse_storage_entry(request, note_id: uuid.UUID, entry_id: uuid.UUID):
+    """Get a single delivery entry."""
+    entry = get_object_or_404(
+        WarehouseStorageEntry.objects.prefetch_related("items__storage_item"),
+        id=entry_id,
+        storage_note__id=note_id,
+    )
+    return _entry_to_schema(entry)
+
+
+@router.delete(
+    "/warehouse-storage-notes/{note_id}/entries/{entry_id}",
+    auth=JWTAuth(),
+)
+def delete_warehouse_storage_entry(request, note_id: uuid.UUID, entry_id: uuid.UUID):
+    """Delete a delivery entry. Decrements remaining_quantity on each item."""
+    entry = get_object_or_404(
+        WarehouseStorageEntry,
+        id=entry_id,
+        storage_note__id=note_id,
+    )
+    # Decrement remaining_quantity for each item in this entry
+    for ei in entry.items.all():
+        storage_item = ei.storage_item
+        updated = (storage_item.remaining_quantity or 0) - ei.quantity
+        WarehouseStorageItem.objects.filter(pk=storage_item.pk).update(
+            remaining_quantity=max(updated, 0)
+        )
+    entry.delete()
+    return {"detail": "Entry deleted successfully."}
+
+
+def _entry_to_schema(entry) -> dict:
+    return {
+        "id": entry.id,
+        "entry_date": entry.entry_date,
+        "remark": entry.remark,
+        "items": [
+            {
+                "id": ei.id,
+                "storage_item_id": ei.storage_item_id,
+                "item_name": ei.storage_item.item_name,
+                "code": ei.storage_item.code,
+                "quantity": ei.quantity,
+                "bags": ei.bags,
+            }
+            for ei in entry.items.select_related("storage_item").all()
+        ],
+        "created_at": entry.created_at.isoformat() if entry.created_at else None,
+    }
+
+
+# ============================================================
+# Warehouse Storage Price (set by accounting)
+# ============================================================
+
+@router.put(
+    "/warehouse-storage-notes/{note_id}/price",
+    response=WarehouseStorageNoteDetailSchema,
+    auth=JWTAuth(),
+)
+def set_warehouse_storage_price(request, note_id: uuid.UUID, payload: WarehouseStoragePriceSetSchema):
+    """Set or update the storage price for a WSN (used by accounting)."""
+    note = get_object_or_404(
+        WarehouseStorageNote.objects.prefetch_related(
+            "items", "expiration_fee_tiers", "top_ups", "entries"
+        ),
+        id=note_id,
+    )
+    note.storage_price = payload.storage_price
+    note.price_entered_by = request.user
+    note.price_entered_at = timezone.now()
+    note.save()
+    note.refresh_from_db()
+    return _storage_note_to_schema(note)
+
+
+# ============================================================
+# Warehouse Item Flow
+# ============================================================
+
+@router.get(
+    "/warehouse-storage-notes/{note_id}/flow",
+    response=WarehouseItemFlowSchema,
+)
+def get_warehouse_item_flow(request, note_id: uuid.UUID):
+    """Get the complete flow of items for a storage note: entries, releases, payments."""
+    from accounting.models import WarehouseStoragePayment
+
+    note = get_object_or_404(
+        WarehouseStorageNote.objects.prefetch_related(
+            "items", "entries__items__storage_item",
+            "release_notes__items",
+        ),
+        id=note_id,
+    )
+
+    # Compute totals
+    total_agreed = sum(i.quantity for i in note.items.all())
+    total_entry_qty = sum(
+        ei.quantity
+        for entry in note.entries.all()
+        for ei in entry.items.all()
+    )
+    total_released = sum(
+        ri.quantity
+        for wrn in note.release_notes.all()
+        for ri in wrn.items.all()
+    )
+    remaining = total_entry_qty - total_released
+
+    # Entry flow
+    entries = []
+    for entry in note.entries.all():
+        for ei in entry.items.select_related("storage_item").all():
+            entries.append(WarehouseItemFlowEntrySchema(
+                entry_id=entry.id,
+                entry_date=entry.entry_date,
+                item_name=ei.storage_item.item_name,
+                code=ei.storage_item.code,
+                quantity=ei.quantity,
+                bags=ei.bags,
+            ))
+
+    # Release flow
+    releases = []
+    for wrn in note.release_notes.all():
+        for ri in wrn.items.all():
+            releases.append(WarehouseItemFlowReleaseSchema(
+                wrn_no=wrn.wrn_no,
+                release_date=wrn.date,
+                item_name=ri.item_name,
+                code=ri.code,
+                quantity=ri.quantity,
+                bags=ri.bags,
+            ))
+
+    # Payment flow
+    payments = WarehouseStoragePayment.objects.filter(
+        storage_note=note,
+    ).order_by("payment_date")
+    total_paid = Decimal("0")
+    payment_list = []
+    for p in payments:
+        payment_list.append(WarehouseItemFlowPaymentSchema(
+            payment_number=p.payment_number,
+            payment_date=p.payment_date,
+            amount=float(p.amount),
+            payment_type=p.payment_type,
+            status=p.status,
+        ))
+        if p.status in ("approved", "completed"):
+            total_paid += Decimal(str(p.amount or 0))
+
+    storage_price = Decimal(str(note.storage_price or 0))
+    payment_remaining = max(storage_price - total_paid, Decimal("0"))
+
+    return WarehouseItemFlowSchema(
+        wsn_no=note.wsn_no,
+        customer_name=note.customer_name,
+        contract_date=note.date,
+        storage_price=float(note.storage_price),
+        total_agreed_quantity=total_agreed,
+        total_entry_quantity=total_entry_qty,
+        total_released_quantity=total_released,
+        remaining_quantity=remaining,
+        entries=entries,
+        releases=releases,
+        payments=payment_list,
+        total_paid=float(total_paid),
+        payment_remaining=float(payment_remaining),
+    )
+
+
+# ============================================================
+# Warehouse Item Inventory
+# ============================================================
+
+@router.get(
+    "/warehouse-item-inventory",
+    response=list[WarehouseItemInventorySchema],
+)
+def get_warehouse_item_inventory(request, item_name: str = None, code: str = None):
+    """Get inventory summary for items across all storage notes.
+
+    Optional filters: item_name, code.
+    """
+    from accounting.models import WarehouseStoragePayment
+
+    # Get all active storage notes with items
+    notes = WarehouseStorageNote.objects.filter(
+        is_active=True,
+    ).prefetch_related("items", "entries__items__storage_item", "release_notes__items")
+
+    # Build inventory per item
+    item_map = {}  # key: (item_name, code) -> {total_stored, total_released, notes_data}
+
+    for note in notes:
+        for si in note.items.all():
+            key = (si.item_name, si.code or "")
+            if item_name and si.item_name.lower() != item_name.lower():
+                continue
+            if code and (si.code or "").lower() != code.lower():
+                continue
+
+            if key not in item_map:
+                item_map[key] = {
+                    "item_name": si.item_name,
+                    "code": si.code,
+                    "internal_code": si.internal_code,
+                    "total_stored": 0,
+                    "total_released": 0,
+                    "remaining": 0,
+                    "storage_notes": {},
+                }
+
+            # Entry quantities for this storage item
+            entered = sum(
+                ei.quantity
+                for entry in note.entries.all()
+                for ei in entry.items.filter(storage_item=si)
+            )
+            # Release quantities for this storage item
+            released = sum(
+                ri.quantity
+                for wrn in note.release_notes.all()
+                for ri in wrn.items.filter(
+                    storage_item=si,
+                )
+            )
+
+            item_map[key]["total_stored"] += entered
+            item_map[key]["total_released"] += released
+            item_map[key]["remaining"] += si.remaining_quantity or 0
+
+            # Track per-WSN breakdown
+            if note.wsn_no not in item_map[key]["storage_notes"]:
+                item_map[key]["storage_notes"][note.wsn_no] = {
+                    "wsn_no": note.wsn_no,
+                    "customer_name": note.customer_name,
+                    "contract_date": note.date,
+                    "total_quantity": si.quantity,
+                    "entered_quantity": 0,
+                    "released_quantity": 0,
+                    "remaining_quantity": si.remaining_quantity or 0,
+                }
+            item_map[key]["storage_notes"][note.wsn_no]["entered_quantity"] += entered
+            item_map[key]["storage_notes"][note.wsn_no]["released_quantity"] += released
+
+    result = []
+    for key, data in item_map.items():
+        result.append(WarehouseItemInventorySchema(
+            item_name=data["item_name"],
+            code=data["code"],
+            internal_code=data["internal_code"],
+            total_stored=data["total_stored"],
+            total_released=data["total_released"],
+            remaining=data["remaining"],
+            storage_notes=[
+                WarehouseItemInventoryNoteSchema(**ns)
+                for ns in data["storage_notes"].values()
+            ],
+        ))
+
+    return result
 
 
 @router.get("/warehouse-expiry-check", auth=JWTAuth())

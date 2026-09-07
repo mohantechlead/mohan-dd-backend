@@ -773,7 +773,7 @@ class ExpirationFeeTierCreateSchema(Schema):
 
 
 class WarehouseStorageNoteCreatePayloadSchema(Schema):
-    wsn_no: str
+    wsn_no: Optional[str] = None
     customer_name: str
     date: date
     ECD_no: Optional[str] = None
@@ -784,7 +784,7 @@ class WarehouseStorageNoteCreatePayloadSchema(Schema):
     grace_period_value: Optional[int] = 0
     grace_period_unit: Optional[str] = "days"
     items: List[WarehouseStorageItemCreateSchema]
-    expiration_fee_tiers: List[ExpirationFeeTierCreateSchema]
+    expiration_fee_tiers: List[ExpirationFeeTierCreateSchema] = []
 
 
 class ExpirationFeeTierSchema(Schema):
@@ -823,6 +823,39 @@ class WarehouseStorageTopUpSchema(Schema):
     remark: Optional[str] = None
 
 
+# ============================================================
+# Warehouse Storage Entries (flexible partial deliveries)
+# ============================================================
+
+class WarehouseStorageEntryItemCreateSchema(Schema):
+    storage_item_id: int
+    quantity: float
+    bags: Optional[float] = None
+
+
+class WarehouseStorageEntryCreateSchema(Schema):
+    entry_date: date
+    remark: Optional[str] = None
+    items: List[WarehouseStorageEntryItemCreateSchema]
+
+
+class WarehouseStorageEntryItemSchema(Schema):
+    id: int
+    storage_item_id: int
+    item_name: str
+    code: Optional[str] = None
+    quantity: float
+    bags: Optional[float] = None
+
+
+class WarehouseStorageEntrySchema(Schema):
+    id: uuid.UUID
+    entry_date: date
+    remark: Optional[str] = None
+    items: List[WarehouseStorageEntryItemSchema]
+    created_at: Optional[str] = None
+
+
 class WarehouseStorageNoteDetailSchema(Schema):
     id: uuid.UUID
     wsn_no: str
@@ -833,6 +866,8 @@ class WarehouseStorageNoteDetailSchema(Schema):
     storage_period_value: int
     storage_period_unit: str
     storage_price: float
+    price_entered_by: Optional[str] = None
+    price_entered_at: Optional[str] = None
     grace_period_value: int
     grace_period_unit: str
     status: str
@@ -845,6 +880,10 @@ class WarehouseStorageNoteDetailSchema(Schema):
     items: List[WarehouseStorageItemSchema]
     expiration_fee_tiers: List[ExpirationFeeTierSchema]
     top_ups: List[WarehouseStorageTopUpSchema]
+    entries: List[WarehouseStorageEntrySchema] = []
+    total_entry_quantity: float = 0
+    total_paid: float = 0
+    payment_remaining: float = 0
 
 
 class WarehouseStorageNoteUpdateSchema(Schema):
@@ -870,7 +909,7 @@ class WarehouseReleaseItemCreateSchema(Schema):
 
 
 class WarehouseReleaseNoteCreateSchema(Schema):
-    wrn_no: str
+    wrn_no: Optional[str] = None
     storage_note_id: uuid.UUID
     customer_name: str
     date: date
@@ -897,3 +936,78 @@ class WarehouseReleaseNoteDetailSchema(Schema):
     date: date
     remark: Optional[str] = None
     items: List[WarehouseReleaseItemSchema]
+
+
+# ============================================================
+# Warehouse Storage Price (set by accounting)
+# ============================================================
+
+class WarehouseStoragePriceSetSchema(Schema):
+    storage_price: float
+    remark: Optional[str] = None
+
+
+# ============================================================
+# Warehouse Item Flow & Inventory
+# ============================================================
+
+class WarehouseItemFlowEntrySchema(Schema):
+    entry_id: uuid.UUID
+    entry_date: date
+    item_name: str
+    code: Optional[str] = None
+    quantity: float
+    bags: Optional[float] = None
+
+
+class WarehouseItemFlowReleaseSchema(Schema):
+    wrn_no: str
+    release_date: date
+    item_name: str
+    code: Optional[str] = None
+    quantity: float
+    bags: Optional[float] = None
+
+
+class WarehouseItemFlowPaymentSchema(Schema):
+    payment_number: str
+    payment_date: date
+    amount: float
+    payment_type: str
+    status: str
+
+
+class WarehouseItemFlowSchema(Schema):
+    wsn_no: str
+    customer_name: str
+    contract_date: date
+    storage_price: float
+    total_agreed_quantity: float
+    total_entry_quantity: float
+    total_released_quantity: float
+    remaining_quantity: float
+    entries: List[WarehouseItemFlowEntrySchema]
+    releases: List[WarehouseItemFlowReleaseSchema]
+    payments: List[WarehouseItemFlowPaymentSchema]
+    total_paid: float
+    payment_remaining: float
+
+
+class WarehouseItemInventoryNoteSchema(Schema):
+    wsn_no: str
+    customer_name: str
+    contract_date: date
+    total_quantity: float
+    entered_quantity: float
+    released_quantity: float
+    remaining_quantity: float
+
+
+class WarehouseItemInventorySchema(Schema):
+    item_name: str
+    code: Optional[str] = None
+    internal_code: Optional[str] = None
+    total_stored: float
+    total_released: float
+    remaining: float
+    storage_notes: List[WarehouseItemInventoryNoteSchema]

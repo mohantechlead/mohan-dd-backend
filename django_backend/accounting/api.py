@@ -11,10 +11,12 @@ from .models import (
     ExpensePayment,
     ReceivedPayment,
     VendorPayment,
+    WarehouseStoragePayment,
     next_expense_number,
     next_vendor_payment_number,
+    next_warehouse_storage_payment_number,
 )
-from inventory.models import Order, Purchase
+from inventory.models import Order, Purchase, WarehouseStorageNote
 from .schemas import (
     ExpensePaymentApproveSchema,
     ExpensePaymentCreateSchema,
@@ -31,6 +33,11 @@ from .schemas import (
     ReceivedPaymentApproveSchema,
     ReceivedPaymentStatusUpdateSchema,
     ReceivedPaymentUpdateSchema,
+    WarehouseStoragePaymentCreateSchema,
+    WarehouseStoragePaymentDetailSchema,
+    WarehouseStoragePaymentApproveSchema,
+    WarehouseStoragePaymentStatusUpdateSchema,
+    WarehouseStoragePaymentUpdateSchema,
 )
 
 router = Router()
@@ -629,3 +636,213 @@ def update_received_payment_status(request, payment_number: str, payload: Receiv
         rp.reference_number = None
     rp.save()
     return _received_payment_to_schema(rp)
+
+
+# ============================================================
+# Warehouse Storage Payments
+# ============================================================
+
+def _storage_payment_totals(wsn_no: str, exclude_id=None) -> tuple[Decimal, Decimal, Decimal, str]:
+    note = get_object_or_404(
+        WarehouseStorageNote,
+        wsn_no__iexact=wsn_no.strip(),
+    )
+    storage_price = Decimal(str(note.storage_price or 0))
+    qs = WarehouseStoragePayment.objects.filter(
+        storage_note=note,
+        status__in=("approved", "completed"),
+    )
+    if exclude_id is not None:
+        qs = qs.exclude(id=exclude_id)
+    already_paid = sum(Decimal(str(p.amount)) for p in qs)
+    remaining = storage_price - already_paid
+    if remaining < Decimal("0"):
+        remaining = Decimal("0")
+    completion = "full" if remaining == Decimal("0") else "partial"
+    return storage_price, already_paid, remaining, completion
+
+
+def _storage_payment_to_schema(sp: WarehouseStoragePayment) -> WarehouseStoragePaymentDetailSchema:
+    storage_price, already_paid_without_me, _, _ = _storage_payment_totals(sp.storage_note_id, exclude_id=sp.id)
+    total_paid = already_paid_without_me + Decimal(str(sp.amount))
+    remaining = storage_price - total_paid
+    if remaining < Decimal("0"):
+        remaining = Decimal("0")
+    completion = "full" if remaining == Decimal("0") else "partial"
+    return WarehouseStoragePaymentDetailSchema(
+        id=sp.id,
+        payment_number=sp.payment_number,
+        installment_number=sp.installment_number,
+        payment_date=sp.payment_date,
+        wsn_no=sp.storage_note_id,
+        customer_name=sp.customer_name,
+        payment_type=sp.payment_type,
+        amount=float(sp.amount),
+        status=sp.status,
+        approved_by=sp.approved_by.username if sp.approved_by else None,
+        approval_date=sp.approval_date.isoformat() if sp.approval_date else None,
+        completed_by=sp.completed_by.username if sp.completed_by else None,
+        completed_date=sp.completed_date.isoformat() if sp.completed_date else None,
+        cancelled_by=sp.cancelled_by.username if sp.cancelled_by else None,
+        cancelled_date=sp.cancelled_date.isoformat() if sp.cancelled_date else None,
+        reference_number=sp.reference_number,
+        status_remark=sp.status_remark,
+        storage_price=float(storage_price),
+        total_paid=float(total_paid),
+        remaining_amount=float(remaining),
+        payment_completion_status=completion,
+        remark=sp.remark,
+    )
+
+
+@router.post("/warehouse-storage-payments", response=WarehouseStoragePaymentDetailSchema, auth=JWTAuth())
+def create_warehouse_storage_payment(request, payload: WarehouseStoragePaymentCreateSchema):
+    note = get_object_or_404(
+        WarehouseStorageNote,
+        wsn_no__iexact=payload.wsn_no.strip(),
+    )
+    storage_price, already_paid, remaining, _ = _storage_payment_totals(note.wsn_no)
+    if remaining <= Decimal("0"):
+        return JsonResponse({"detail": "This storage note is already fully paid."}, status=400)
+
+    payment_type = (payload.payment_type or "").strip().lower()
+    if payment_type not in ("partial", "full", "paritial"):
+        return JsonResponse({"detail": "payment_type must be 'Partial' or 'Full'."}, status=400)
+    if payment_type == "paritial":
+        payment_type = "partial"
+
+    if payment_type == "full":
+        amount = remaining
+    else:
+        if payload.amount is None:
+            return JsonResponse({"detail": "amount is required for partial payment."}, status=400)
+        amount = Decimal(str(payload.amount))
+        if amount <= Decimal("0"):
+            return JsonResponse({"detail": "amount must be greater than 0."}, status=400)
+        if amount > remaining:
+            return JsonResponse(
+                {"detail": f"Partial amount cannot exceed remaining amount ({remaining})."},
+                status=400,
+            )
+
+    last_installment = (
+        WarehouseStoragePayment.objects.filter(storage_note=note)
+        .order_by("-installment_number")
+        .values_list("installment_number", flat=True)
+        .first()
+        or 0
+    )
+    next_installment = int(last_installment) + 1
+    generated_payment_number = f"WSP{next_installment:04d}"
+
+    sp = WarehouseStoragePayment.objects.create(
+        id=uuid.uuid4(),
+        payment_number=generated_payment_number,
+        installment_number=next_installment,
+        payment_date=payload.payment_date,
+        storage_note=note,
+        customer_name=note.customer_name,
+        payment_type=payment_type,
+        amount=amount,
+        remark=(payload.remark or "").strip() or None,
+        status="pending",
+    )
+    return _storage_payment_to_schema(sp)
+
+
+@router.get("/warehouse-storage-payments", response=List[WarehouseStoragePaymentDetailSchema], auth=JWTAuth())
+def list_warehouse_storage_payments(request):
+    rows = WarehouseStoragePayment.objects.select_related("storage_note").all().order_by("-payment_number")
+    return [_storage_payment_to_schema(sp) for sp in rows]
+
+
+@router.get("/warehouse-storage-payments/next-number", auth=JWTAuth())
+def warehouse_storage_payment_next_number(request):
+    values = WarehouseStoragePayment.objects.values_list("payment_number", flat=True)
+    return {"next_number": next_warehouse_storage_payment_number(values)}
+
+
+@router.get("/warehouse-storage-payments/{payment_number}", response=WarehouseStoragePaymentDetailSchema, auth=JWTAuth())
+def get_warehouse_storage_payment(request, payment_number: str):
+    sp = get_object_or_404(WarehouseStoragePayment, payment_number__iexact=payment_number.strip())
+    return _storage_payment_to_schema(sp)
+
+
+@router.put("/warehouse-storage-payments/{payment_number}", response=WarehouseStoragePaymentDetailSchema, auth=JWTAuth())
+def update_warehouse_storage_payment(request, payment_number: str, payload: WarehouseStoragePaymentUpdateSchema):
+    sp = get_object_or_404(WarehouseStoragePayment, payment_number__iexact=payment_number.strip())
+    _, _, remaining_without_me, _ = _storage_payment_totals(sp.storage_note_id, exclude_id=sp.id)
+
+    payment_type = (payload.payment_type or "").strip().lower()
+    if payment_type not in ("partial", "full", "paritial"):
+        return JsonResponse({"detail": "payment_type must be 'Partial' or 'Full'."}, status=400)
+    if payment_type == "paritial":
+        payment_type = "partial"
+
+    if payment_type == "full":
+        amount = remaining_without_me
+    else:
+        if payload.amount is None:
+            return JsonResponse({"detail": "amount is required for partial payment."}, status=400)
+        amount = Decimal(str(payload.amount))
+        if amount <= Decimal("0"):
+            return JsonResponse({"detail": "amount must be greater than 0."}, status=400)
+        if amount > remaining_without_me:
+            return JsonResponse(
+                {"detail": f"Partial amount cannot exceed remaining amount ({remaining_without_me})."},
+                status=400,
+            )
+
+    sp.payment_date = payload.payment_date
+    sp.payment_type = payment_type
+    sp.amount = amount
+    sp.remark = (payload.remark or "").strip() or None
+    sp.save()
+    return _storage_payment_to_schema(sp)
+
+
+@router.delete("/warehouse-storage-payments/{payment_number}", auth=JWTAuth())
+def delete_warehouse_storage_payment(request, payment_number: str):
+    sp = get_object_or_404(WarehouseStoragePayment, payment_number__iexact=payment_number.strip())
+    sp.delete()
+    return {"detail": "Warehouse storage payment deleted successfully."}
+
+
+@router.post("/warehouse-storage-payments/{payment_number}/approve", response=WarehouseStoragePaymentDetailSchema, auth=JWTAuth())
+def approve_warehouse_storage_payment(request, payment_number: str, payload: WarehouseStoragePaymentApproveSchema):
+    sp = get_object_or_404(WarehouseStoragePayment, payment_number__iexact=payment_number.strip())
+    sp.status = "approved"
+    sp.approved_by_id = payload.approved_by_id
+    sp.approval_date = timezone.now()
+    sp.save()
+    return _storage_payment_to_schema(sp)
+
+
+@router.post("/warehouse-storage-payments/{payment_number}/update-status", response=WarehouseStoragePaymentDetailSchema, auth=JWTAuth())
+def update_warehouse_storage_payment_status(request, payment_number: str, payload: WarehouseStoragePaymentStatusUpdateSchema):
+    sp = get_object_or_404(WarehouseStoragePayment, payment_number__iexact=payment_number.strip())
+    if sp.status != "approved":
+        return JsonResponse(
+            {"detail": "Only approved warehouse storage payments can be marked as completed or cancelled."},
+            status=400,
+        )
+    if payload.status not in ("completed", "cancelled"):
+        return JsonResponse({"detail": "Status must be 'completed' or 'cancelled'."}, status=400)
+    if payload.status == "completed" and not (payload.reference_number or "").strip():
+        return JsonResponse({"detail": "reference_number is required when completing payment."}, status=400)
+    if payload.status == "cancelled" and not (payload.remark or "").strip():
+        return JsonResponse({"detail": "remark is required when cancelling payment."}, status=400)
+
+    sp.status = payload.status
+    if payload.status == "completed":
+        sp.completed_by_id = payload.user_id
+        sp.completed_date = timezone.now()
+        sp.reference_number = (payload.reference_number or "").strip()
+        sp.status_remark = None
+    else:
+        sp.cancelled_by_id = payload.user_id
+        sp.cancelled_date = timezone.now()
+        sp.status_remark = (payload.remark or "").strip()
+        sp.reference_number = None
+    sp.save()
+    return _storage_payment_to_schema(sp)
