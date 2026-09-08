@@ -131,6 +131,8 @@ from .schemas import (
     WarehouseStorageTopUpSchema,
     WarehouseStorageNoteDetailSchema,
     WarehouseStorageNoteUpdateSchema,
+    WarehouseStorageEntryCreateSchema,
+    WarehouseStorageEntrySchema,
     WarehouseReleaseItemCreateSchema,
     WarehouseReleaseNoteCreateSchema,
     WarehouseReleaseItemSchema,
@@ -139,6 +141,7 @@ from .schemas import (
     WarehouseStorageEntrySchema,
     WarehouseStorageEntryItemSchema,
     WarehouseStoragePriceSetSchema,
+    ExpirationFeeTiersSetSchema,
     WarehouseItemFlowSchema,
     WarehouseItemFlowEntrySchema,
     WarehouseItemFlowReleaseSchema,
@@ -4588,6 +4591,36 @@ def set_warehouse_storage_price(request, note_id: uuid.UUID, payload: WarehouseS
     note.price_entered_by = request.user
     note.price_entered_at = timezone.now()
     note.save()
+    note.refresh_from_db()
+    return _storage_note_to_schema(note)
+
+
+# ============================================================
+# Expiration Fee Tiers (set by accounting)
+# ============================================================
+
+@router.post(
+    "/warehouse-storage-notes/{note_id}/expiration-fee-tiers",
+    response=WarehouseStorageNoteDetailSchema,
+    auth=JWTAuth(),
+)
+def set_expiration_fee_tiers(request, note_id: uuid.UUID, payload: ExpirationFeeTiersSetSchema):
+    """Set or replace the expiration fee tiers for a WSN (used by accounting)."""
+    note = get_object_or_404(
+        WarehouseStorageNote.objects.prefetch_related(
+            "items", "expiration_fee_tiers", "top_ups", "entries"
+        ),
+        id=note_id,
+    )
+    note.expiration_fee_tiers.all().delete()
+    for tier in payload.expiration_fee_tiers or []:
+        ExpirationFeeTier.objects.create(
+            storage_note=note,
+            tier_index=tier.tier_index,
+            period_value=tier.period_value,
+            period_unit=tier.period_unit,
+            fee_amount=tier.fee_amount,
+        )
     note.refresh_from_db()
     return _storage_note_to_schema(note)
 

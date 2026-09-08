@@ -947,6 +947,10 @@ class WarehouseStoragePriceSetSchema(Schema):
     remark: Optional[str] = None
 
 
+class ExpirationFeeTiersSetSchema(Schema):
+    expiration_fee_tiers: List[ExpirationFeeTierCreateSchema]
+
+
 # ============================================================
 # Warehouse Item Flow & Inventory
 # ============================================================
