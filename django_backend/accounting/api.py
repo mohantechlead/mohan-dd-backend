@@ -650,7 +650,7 @@ def _storage_payment_totals(wsn_no: str, exclude_id=None) -> tuple[Decimal, Deci
     storage_price = Decimal(str(note.storage_price or 0))
     qs = WarehouseStoragePayment.objects.filter(
         storage_note=note,
-        status__in=("approved", "completed"),
+        status__in=("pending", "approved", "completed"),
     )
     if exclude_id is not None:
         qs = qs.exclude(id=exclude_id)

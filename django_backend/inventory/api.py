@@ -4300,8 +4300,30 @@ def warehouse_storage_top_up(request, note_id: uuid.UUID, payload: WarehouseStor
         price=payload.price,
         remark=payload.remark,
     )
-    # Reset expiry notification state so a new notification can be sent after extension
+    # Extend storage period
+    new_value = (note.storage_period_value or 0) + payload.additional_period_value
+    new_unit = payload.additional_period_unit or note.storage_period_unit
+    # Recompute expiry date based on extended period
+    from datetime import timedelta
+    start = note.date or timezone.now().date()
+    if new_unit == "days":
+        new_expiry = start + timedelta(days=new_value)
+    elif new_unit == "weeks":
+        new_expiry = start + timedelta(weeks=new_value)
+    elif new_unit == "months":
+        yr = start.year + (start.month + new_value - 1) // 12
+        mn = (start.month + new_value - 1) % 12 + 1
+        dy = min(start.day, 28)
+        new_expiry = date_type(yr, mn, dy)
+    elif new_unit == "years":
+        new_expiry = date_type(start.year + new_value, start.month, min(start.day, 28))
+    else:
+        new_expiry = start + timedelta(days=new_value * 30)
     WarehouseStorageNote.objects.filter(pk=note.pk).update(
+        storage_period_value=new_value,
+        storage_period_unit=new_unit,
+        storage_expiry_date=new_expiry,
+        current_expiry_date=new_expiry,
         expiry_notified=False,
         last_notified_tier=0,
     )
