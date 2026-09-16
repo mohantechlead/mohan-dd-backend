@@ -1,10 +1,7 @@
 import html
-import json
 import logging
 import math
 import re
-import urllib.request
-import urllib.error
 from decimal import Decimal
 from ninja import Router
 from typing import List, Optional
@@ -19,42 +16,6 @@ from django.conf import settings
 logger = logging.getLogger(__name__)
 
 
-def _send_whatsapp_message(phone_number: str, message: str) -> bool:
-    """Send a WhatsApp message via the configured WhatsApp API.
-
-    Requires settings.WHATSAPP_API_URL and WHATSAPP_API_TOKEN.
-    Falls back gracefully if not configured.
-    """
-    api_url = getattr(settings, "WHATSAPP_API_URL", "")
-    api_token = getattr(settings, "WHATSAPP_API_TOKEN", "")
-    if not api_url or not api_token:
-        logger.info("WhatsApp not configured; skipping message to %s", phone_number)
-        return False
-    try:
-        payload = json.dumps({
-            "messaging_product": "whatsapp",
-            "to": phone_number,
-            "type": "text",
-            "text": {"body": message},
-        }).encode("utf-8")
-        req = urllib.request.Request(
-            api_url,
-            data=payload,
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_token}",
-            },
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            status = resp.status
-        logger.info("WhatsApp message sent to %s (status %s)", phone_number, status)
-        return True
-    except Exception as e:
-        logger.exception("Failed to send WhatsApp message to %s: %s", phone_number, e)
-        return False
-
-
 def _warehouse_expiry_recipients() -> list:
     """Return the list of email recipients for warehouse expiry notifications."""
     recipients = getattr(settings, "WAREHOUSE_EXPIRY_NOTIFICATION_RECIPIENTS", None)
@@ -62,11 +23,6 @@ def _warehouse_expiry_recipients() -> list:
         # Fall back to the shared inventory notification list for backward compatibility.
         recipients = getattr(settings, "NOTIFICATION_EMAIL_RECIPIENTS", [])
     return recipients
-
-
-def _warehouse_expiry_whatsapp_recipients() -> list:
-    """Return the list of phone numbers for warehouse expiry WhatsApp notifications."""
-    return getattr(settings, "WAREHOUSE_EXPIRY_WHATSAPP_RECIPIENTS", [])
 
 
 def _send_notification_mail(
@@ -4156,21 +4112,8 @@ def _check_and_notify_warehouse_expiry(note) -> bool:
             recipient_list=recipient_list,
             html_message=html_message,
         )
-        # Send WhatsApp notifications
-        whatsapp_recipients = _warehouse_expiry_whatsapp_recipients()
-        whatsapp_msg = (
-            f"Warehouse Storage Expiry Alert\n\n"
-            f"WSN: {note.wsn_no}\n"
-            f"Customer: {note.customer_name}\n"
-            f"Expiry Date: {expiry_str}\n"
-            f"Periods Expired: {exp['periods_expired']}\n"
-            f"Current Fee: ${fee_text}\n\n"
-            f"An expiration fee now applies. Please contact the customer."
-        )
-        for phone in whatsapp_recipients:
-            _send_whatsapp_message(phone, whatsapp_msg)
 
-        if sent > 0 or whatsapp_recipients:
+        if sent > 0:
             logger.info("Warehouse expiry notification sent for WSN %s", note.wsn_no)
             WarehouseStorageNote.objects.filter(pk=note.pk).update(
                 expiry_notified=True,
