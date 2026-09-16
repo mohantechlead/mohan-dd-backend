@@ -5029,7 +5029,11 @@ def get_warehouse_audit_logs(request, storage_note_id: str = None, limit: int = 
 
 def _log_warehouse_action(user, action, entity_type, entity_id=None, storage_note=None, details=None):
     """Helper to create an audit log entry."""
+    from django.contrib.auth import get_user_model
     from inventory.models import WarehouseAuditLog
+    User = get_user_model()
+    if not user or not isinstance(user, User):
+        return
     WarehouseAuditLog.objects.create(
         user=user,
         action=action,
