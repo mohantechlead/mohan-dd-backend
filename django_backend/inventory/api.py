@@ -4902,11 +4902,14 @@ def get_warehouse_dashboard(request):
             total_items_remaining += Decimal(str(si.remaining_quantity or 0))
 
         # Check if expiring soon
-        if note.status == "active" and note.current_expiry_date:
+        if note.status == "active":
+            exp = _compute_expiration(note)
             try:
-                exp_date = note.current_expiry_date if isinstance(note.current_expiry_date, tz.datetime) else tz.datetime.fromisoformat(str(note.current_expiry_date))
-                if exp_date > now and exp_date <= thirty_days:
-                    expiring_soon_count += 1
+                exp_date_str = exp.get("current_expiry_date")
+                if exp_date_str:
+                    exp_date = exp_date_str if isinstance(exp_date_str, tz.datetime) else tz.datetime.fromisoformat(str(exp_date_str))
+                    if exp_date > now and exp_date <= thirty_days:
+                        expiring_soon_count += 1
             except (ValueError, TypeError):
                 pass
 
