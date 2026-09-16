@@ -1,7 +1,10 @@
 import html
+import json
 import logging
 import math
 import re
+import urllib.request
+import urllib.error
 from decimal import Decimal
 from ninja import Router
 from typing import List, Optional
@@ -14,6 +17,56 @@ from django.core.mail import send_mail
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _send_whatsapp_message(phone_number: str, message: str) -> bool:
+    """Send a WhatsApp message via the configured WhatsApp API.
+
+    Requires settings.WHATSAPP_API_URL and WHATSAPP_API_TOKEN.
+    Falls back gracefully if not configured.
+    """
+    api_url = getattr(settings, "WHATSAPP_API_URL", "")
+    api_token = getattr(settings, "WHATSAPP_API_TOKEN", "")
+    if not api_url or not api_token:
+        logger.info("WhatsApp not configured; skipping message to %s", phone_number)
+        return False
+    try:
+        payload = json.dumps({
+            "messaging_product": "whatsapp",
+            "to": phone_number,
+            "type": "text",
+            "text": {"body": message},
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            api_url,
+            data=payload,
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {api_token}",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            status = resp.status
+        logger.info("WhatsApp message sent to %s (status %s)", phone_number, status)
+        return True
+    except Exception as e:
+        logger.exception("Failed to send WhatsApp message to %s: %s", phone_number, e)
+        return False
+
+
+def _warehouse_expiry_recipients() -> list:
+    """Return the list of email recipients for warehouse expiry notifications."""
+    recipients = getattr(settings, "WAREHOUSE_EXPIRY_NOTIFICATION_RECIPIENTS", None)
+    if not recipients:
+        # Fall back to the shared inventory notification list for backward compatibility.
+        recipients = getattr(settings, "NOTIFICATION_EMAIL_RECIPIENTS", [])
+    return recipients
+
+
+def _warehouse_expiry_whatsapp_recipients() -> list:
+    """Return the list of phone numbers for warehouse expiry WhatsApp notifications."""
+    return getattr(settings, "WAREHOUSE_EXPIRY_WHATSAPP_RECIPIENTS", [])
 
 
 def _send_notification_mail(
@@ -3977,14 +4030,6 @@ def _storage_note_to_schema(note) -> dict:
     }
 
 
-def _warehouse_expiry_recipients() -> list:
-    recipients = getattr(settings, "WAREHOUSE_EXPIRATION_RECIPIENTS", [])
-    if not recipients:
-        # Fall back to the shared inventory notification list for backward compatibility.
-        recipients = getattr(settings, "NOTIFICATION_EMAIL_RECIPIENTS", [])
-    return recipients
-
-
 def _check_and_notify_warehouse_expiry(note) -> bool:
     """Send an expired-notification email for a single storage note. Returns True if sent.
 
@@ -4111,7 +4156,21 @@ def _check_and_notify_warehouse_expiry(note) -> bool:
             recipient_list=recipient_list,
             html_message=html_message,
         )
-        if sent > 0:
+        # Send WhatsApp notifications
+        whatsapp_recipients = _warehouse_expiry_whatsapp_recipients()
+        whatsapp_msg = (
+            f"Warehouse Storage Expiry Alert\n\n"
+            f"WSN: {note.wsn_no}\n"
+            f"Customer: {note.customer_name}\n"
+            f"Expiry Date: {expiry_str}\n"
+            f"Periods Expired: {exp['periods_expired']}\n"
+            f"Current Fee: ${fee_text}\n\n"
+            f"An expiration fee now applies. Please contact the customer."
+        )
+        for phone in whatsapp_recipients:
+            _send_whatsapp_message(phone, whatsapp_msg)
+
+        if sent > 0 or whatsapp_recipients:
             logger.info("Warehouse expiry notification sent for WSN %s", note.wsn_no)
             WarehouseStorageNote.objects.filter(pk=note.pk).update(
                 expiry_notified=True,
@@ -4288,17 +4347,6 @@ def warehouse_storage_top_up(request, note_id: uuid.UUID, payload: WarehouseStor
         ),
         id=note_id,
     )
-    exp = _compute_expiration(note)
-    if exp["expired"]:
-        return JsonResponse(
-            {
-                "detail": (
-                    "This storage note has already expired. Expired storage cannot be "
-                    "topped up; contact the warehouse team."
-                )
-            },
-            status=400,
-        )
     if payload.additional_period_unit not in _PERIOD_UNITS:
         return JsonResponse({"detail": "Invalid period unit."}, status=400)
     WarehouseStorageTopUp.objects.create(
@@ -4308,6 +4356,11 @@ def warehouse_storage_top_up(request, note_id: uuid.UUID, payload: WarehouseStor
         additional_period_unit=payload.additional_period_unit,
         price=payload.price,
         remark=payload.remark,
+    )
+    # Reset expiry notification state so a new notification can be sent after extension
+    WarehouseStorageNote.objects.filter(pk=note.pk).update(
+        expiry_notified=False,
+        last_notified_tier=0,
     )
     note.refresh_from_db()
     return _storage_note_to_schema(note)
@@ -4751,12 +4804,14 @@ def get_warehouse_item_flow(request, note_id: uuid.UUID):
     "/warehouse-item-inventory",
     response=list[WarehouseItemInventorySchema],
 )
-def get_warehouse_item_inventory(request, item_name: str = None, code: str = None):
+def get_warehouse_item_inventory(request, item_name: str = None, code: str = None, group_by_name: str = None):
     """Get inventory summary for items across all storage notes.
 
-    Optional filters: item_name, code.
+    Optional filters: item_name, code, group_by_name (true to aggregate by name only).
     """
     from accounting.models import WarehouseStoragePayment
+
+    aggregate_by_name = (group_by_name or "").lower() == "true"
 
     # Get all active storage notes with items
     notes = WarehouseStorageNote.objects.filter(
@@ -4768,7 +4823,10 @@ def get_warehouse_item_inventory(request, item_name: str = None, code: str = Non
 
     for note in notes:
         for si in note.items.all():
-            key = (si.item_name, si.code or "")
+            if aggregate_by_name:
+                key = (si.item_name.lower(), "")
+            else:
+                key = (si.item_name, si.code or "")
             if item_name and si.item_name.lower() != item_name.lower():
                 continue
             if code and (si.code or "").lower() != code.lower():
@@ -4777,7 +4835,7 @@ def get_warehouse_item_inventory(request, item_name: str = None, code: str = Non
             if key not in item_map:
                 item_map[key] = {
                     "item_name": si.item_name,
-                    "code": si.code,
+                    "code": si.code if not aggregate_by_name else None,
                     "internal_code": si.internal_code,
                     "total_stored": 0,
                     "total_released": 0,

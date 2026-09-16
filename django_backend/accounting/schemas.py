@@ -168,6 +168,7 @@ class ReceivedPaymentDetailSchema(Schema):
 # ============================================================
 
 class WarehouseStoragePaymentCreateSchema(Schema):
+    payment_number: Optional[str] = None
     payment_date: date
     wsn_no: str
     payment_type: str  # partial | full

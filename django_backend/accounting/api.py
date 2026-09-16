@@ -762,11 +762,21 @@ def create_warehouse_storage_payment(request, payload: WarehouseStoragePaymentCr
         or 0
     )
     next_installment = int(last_installment) + 1
-    generated_payment_number = f"WSP{next_installment:04d}"
-    # Ensure global uniqueness
-    while WarehouseStoragePayment.objects.filter(payment_number=generated_payment_number).exists():
-        next_installment += 1
+
+    # Use user-provided payment number if given, otherwise auto-generate
+    user_payment_number = (payload.payment_number or "").strip()
+    if user_payment_number:
+        if WarehouseStoragePayment.objects.filter(payment_number=user_payment_number).exists():
+            return JsonResponse(
+                {"detail": f"Payment number '{user_payment_number}' already exists."},
+                status=400,
+            )
+        generated_payment_number = user_payment_number
+    else:
         generated_payment_number = f"WSP{next_installment:04d}"
+        while WarehouseStoragePayment.objects.filter(payment_number=generated_payment_number).exists():
+            next_installment += 1
+            generated_payment_number = f"WSP{next_installment:04d}"
 
     sp = WarehouseStoragePayment.objects.create(
         id=uuid.uuid4(),
