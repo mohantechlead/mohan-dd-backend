@@ -796,6 +796,7 @@ class ExpirationFeeTierSchema(Schema):
 
 
 class WarehouseStorageItemSchema(Schema):
+    id: int
     item_id: uuid.UUID
     item_name: str
     code: Optional[str] = None
@@ -840,7 +841,7 @@ class WarehouseStorageEntryCreateSchema(Schema):
 
 
 class WarehouseStorageEntryItemSchema(Schema):
-    id: int
+    id: uuid.UUID
     storage_item_id: int
     item_name: str
     code: Optional[str] = None
@@ -1015,3 +1016,18 @@ class WarehouseItemInventorySchema(Schema):
     total_released: float
     remaining: float
     storage_notes: List[WarehouseItemInventoryNoteSchema]
+
+
+class WarehouseDashboardSchema(Schema):
+    total_wsns: int
+    active_wsns: int
+    expired_wsns: int
+    released_wsns: int
+    total_storage_value: float
+    total_paid: float
+    payment_remaining: float
+    total_items_stored: float
+    total_items_released: float
+    total_items_remaining: float
+    expiring_soon_count: int
+    recent_wsns: List[WarehouseStorageNoteDetailSchema]

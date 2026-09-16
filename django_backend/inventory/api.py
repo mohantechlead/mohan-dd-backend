@@ -148,6 +148,7 @@ from .schemas import (
     WarehouseItemFlowPaymentSchema,
     WarehouseItemInventorySchema,
     WarehouseItemInventoryNoteSchema,
+    WarehouseDashboardSchema,
 )
 import uuid
 from django.http import JsonResponse
@@ -3917,6 +3918,7 @@ def _storage_note_to_schema(note) -> dict:
         "current_expiration_fee": exp["current_expiration_fee"],
         "items": [
             {
+                "id": i.id,
                 "item_id": i.item_id,
                 "item_name": i.item_name,
                 "code": i.code,
@@ -4203,6 +4205,14 @@ def create_warehouse_storage_note(request, payload: WarehouseStorageNoteCreatePa
             remaining_quantity=item.quantity,
         )
     note.refresh_from_db()
+    _log_warehouse_action(
+        getattr(request, "user", None),
+        "created",
+        "wsn",
+        note.id,
+        storage_note=note,
+        details={"wsn_no": note.wsn_no, "customer_name": note.customer_name},
+    )
     return _storage_note_to_schema(note)
 
 
@@ -4303,7 +4313,7 @@ def warehouse_storage_top_up(request, note_id: uuid.UUID, payload: WarehouseStor
     return _storage_note_to_schema(note)
 
 
-@router.post("/warehouse-release-notes", response=WarehouseReleaseNoteDetailSchema)
+@router.post("/warehouse-release-notes", response=WarehouseReleaseNoteDetailSchema, auth=JWTAuth())
 def create_warehouse_release_note(request, payload: WarehouseReleaseNoteCreateSchema):
     storage_note = get_object_or_404(
         WarehouseStorageNote.objects.prefetch_related("items"),
@@ -4592,12 +4602,15 @@ def set_warehouse_storage_price(request, note_id: uuid.UUID, payload: WarehouseS
     note.price_entered_at = timezone.now()
     note.save()
     note.refresh_from_db()
+    _log_warehouse_action(
+        request.user,
+        "price_set",
+        "price",
+        note.id,
+        storage_note=note,
+        details={"storage_price": float(payload.storage_price)},
+    )
     return _storage_note_to_schema(note)
-
-
-# ============================================================
-# Expiration Fee Tiers (set by accounting)
-# ============================================================
 
 @router.post(
     "/warehouse-storage-notes/{note_id}/expiration-fee-tiers",
@@ -4622,6 +4635,14 @@ def set_expiration_fee_tiers(request, note_id: uuid.UUID, payload: ExpirationFee
             fee_amount=tier.fee_amount,
         )
     note.refresh_from_db()
+    _log_warehouse_action(
+        request.user,
+        "tiers_set",
+        "tiers",
+        note.id,
+        storage_note=note,
+        details={"tier_count": len(payload.expiration_fee_tiers or [])},
+    )
     return _storage_note_to_schema(note)
 
 
@@ -4820,4 +4841,140 @@ def warehouse_expiry_check(request):
     """(Re)run the expiration scan and send notifications for any newly-expired storage notes."""
     sent = _check_and_notify_all_warehouse_expiry()
     return {"checked": True, "notifications_sent": sent}
+
+
+# ============================================================
+# Warehouse Dashboard Summary
+# ============================================================
+
+@router.get("/warehouse-dashboard", response=WarehouseDashboardSchema)
+def get_warehouse_dashboard(request):
+    """Summary statistics for the warehouse dashboard."""
+    from accounting.models import WarehouseStoragePayment
+    from django.utils import timezone as tz
+    from datetime import timedelta
+
+    notes = WarehouseStorageNote.objects.prefetch_related(
+        "items", "entries__items__storage_item", "release_notes__items", "expiration_fee_tiers"
+    ).all()
+
+    total_wsns = notes.count()
+    active_wsns = notes.filter(status="active", is_active=True).count()
+    expired_wsns = notes.filter(status="expired").count()
+    released_wsns = notes.filter(status="released").count()
+
+    total_storage_value = Decimal("0")
+    total_paid = Decimal("0")
+    total_items_stored = Decimal("0")
+    total_items_released = Decimal("0")
+    total_items_remaining = Decimal("0")
+
+    expiring_soon_count = 0
+    now = tz.now()
+    thirty_days = now + timedelta(days=30)
+
+    for note in notes:
+        sp = Decimal(str(note.storage_price or 0))
+        total_storage_value += sp
+
+        # Payment totals
+        completed_payments = WarehouseStoragePayment.objects.filter(
+            storage_note=note,
+            status__in=("approved", "completed"),
+        )
+        note_paid = sum(Decimal(str(p.amount or 0)) for p in completed_payments)
+        total_paid += note_paid
+
+        # Item totals
+        for si in note.items.all():
+            entered = sum(
+                ei.quantity
+                for entry in note.entries.all()
+                for ei in entry.items.filter(storage_item=si)
+            )
+            released = sum(
+                ri.quantity
+                for wrn in note.release_notes.all()
+                for ri in wrn.items.filter(storage_item=si)
+            )
+            total_items_stored += Decimal(str(entered))
+            total_items_released += Decimal(str(released))
+            total_items_remaining += Decimal(str(si.remaining_quantity or 0))
+
+        # Check if expiring soon
+        if note.status == "active" and note.current_expiry_date:
+            try:
+                exp_date = note.current_expiry_date if isinstance(note.current_expiry_date, tz.datetime) else tz.datetime.fromisoformat(str(note.current_expiry_date))
+                if exp_date > now and exp_date <= thirty_days:
+                    expiring_soon_count += 1
+            except (ValueError, TypeError):
+                pass
+
+    payment_remaining = max(total_storage_value - total_paid, Decimal("0"))
+
+    # Recent 5 WSNs
+    recent = notes.order_by("-date")[:5]
+    recent_schemas = []
+    for n in recent:
+        try:
+            recent_schemas.append(_storage_note_to_schema(n))
+        except Exception:
+            pass
+
+    return WarehouseDashboardSchema(
+        total_wsns=total_wsns,
+        active_wsns=active_wsns,
+        expired_wsns=expired_wsns,
+        released_wsns=released_wsns,
+        total_storage_value=float(total_storage_value),
+        total_paid=float(total_paid),
+        payment_remaining=float(payment_remaining),
+        total_items_stored=float(total_items_stored),
+        total_items_released=float(total_items_released),
+        total_items_remaining=float(total_items_remaining),
+        expiring_soon_count=expiring_soon_count,
+        recent_wsns=recent_schemas,
+    )
+
+
+# ============================================================
+# Audit Trail
+# ============================================================
+
+@router.get("/warehouse-audit-logs")
+def get_warehouse_audit_logs(request, storage_note_id: str = None, limit: int = 50):
+    """Get audit logs for warehouse operations."""
+    from inventory.models import WarehouseAuditLog
+
+    logs = WarehouseAuditLog.objects.select_related("user").all()
+    if storage_note_id:
+        logs = logs.filter(storage_note_id=storage_note_id)
+    logs = logs[:limit]
+
+    return [
+        {
+            "id": log.id,
+            "storage_note_id": str(log.storage_note_id) if log.storage_note_id else None,
+            "user": log.user.username if log.user else None,
+            "action": log.action,
+            "entity_type": log.entity_type,
+            "entity_id": log.entity_id,
+            "details": log.details,
+            "timestamp": log.timestamp.isoformat() if log.timestamp else None,
+        }
+        for log in logs
+    ]
+
+
+def _log_warehouse_action(user, action, entity_type, entity_id=None, storage_note=None, details=None):
+    """Helper to create an audit log entry."""
+    from inventory.models import WarehouseAuditLog
+    WarehouseAuditLog.objects.create(
+        user=user,
+        action=action,
+        entity_type=entity_type,
+        entity_id=str(entity_id) if entity_id else None,
+        storage_note=storage_note,
+        details=details,
+    )
 

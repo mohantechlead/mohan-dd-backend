@@ -695,6 +695,35 @@ def _storage_payment_to_schema(sp: WarehouseStoragePayment) -> WarehouseStorageP
     )
 
 
+@router.get("/warehouse-storage-payments/plan", auth=JWTAuth())
+def get_payment_plan(request, wsn_no: str, installments: int = 3):
+    """Generate a suggested payment installment plan for a WSN."""
+    note = get_object_or_404(WarehouseStorageNote, wsn_no__iexact=wsn_no.strip())
+    storage_price, already_paid, remaining, _ = _storage_payment_totals(note.wsn_no)
+
+    if installments <= 0:
+        installments = 1
+
+    per_installment = remaining / Decimal(str(installments))
+    plan = []
+    for i in range(1, installments + 1):
+        amount = per_installment if i < installments else remaining - (per_installment * (installments - 1))
+        plan.append({
+            "installment": i,
+            "amount": float(amount),
+            "cumulative": float(per_installment * i if i < installments else remaining),
+        })
+
+    return {
+        "wsn_no": note.wsn_no,
+        "storage_price": float(storage_price),
+        "already_paid": float(already_paid),
+        "remaining": float(remaining),
+        "installments": installments,
+        "plan": plan,
+    }
+
+
 @router.post("/warehouse-storage-payments", response=WarehouseStoragePaymentDetailSchema, auth=JWTAuth())
 def create_warehouse_storage_payment(request, payload: WarehouseStoragePaymentCreateSchema):
     note = get_object_or_404(
@@ -734,6 +763,10 @@ def create_warehouse_storage_payment(request, payload: WarehouseStoragePaymentCr
     )
     next_installment = int(last_installment) + 1
     generated_payment_number = f"WSP{next_installment:04d}"
+    # Ensure global uniqueness
+    while WarehouseStoragePayment.objects.filter(payment_number=generated_payment_number).exists():
+        next_installment += 1
+        generated_payment_number = f"WSP{next_installment:04d}"
 
     sp = WarehouseStoragePayment.objects.create(
         id=uuid.uuid4(),

@@ -564,3 +564,25 @@ class WarehouseReleaseItem(models.Model):
 
     class Meta:
         ordering = ["release_note"]
+
+
+class WarehouseAuditLog(models.Model):
+    """Tracks modifications to warehouse storage notes and related entities."""
+    id = models.BigAutoField(primary_key=True, editable=False)
+    storage_note = models.ForeignKey(
+        WarehouseStorageNote, on_delete=models.CASCADE, related_name="audit_logs", null=True, blank=True
+    )
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, blank=True
+    )
+    action = models.CharField(max_length=50)  # created, updated, deleted, price_set, tiers_set, etc.
+    entity_type = models.CharField(max_length=50)  # wsn, entry, release, payment, price, tiers
+    entity_id = models.CharField(max_length=255, blank=True, null=True)
+    details = models.JSONField(blank=True, null=True)
+    timestamp = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.action} {self.entity_type} by {self.user} at {self.timestamp}"
+
+    class Meta:
+        ordering = ["-timestamp"]
