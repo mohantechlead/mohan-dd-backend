@@ -3334,6 +3334,8 @@ def _shipping_invoice_to_detail_schema(invoice: ShippingInvoice):
         bill_of_lading_remark=invoice.bill_of_lading_remark,
         bank=invoice.bank,
         sr_no=invoice.sr_no,
+        destination_contact_name=invoice.destination_contact_name,
+        destination_contact_number=invoice.destination_contact_number,
         authorized_by=invoice.authorized_by,
         authorized_at=invoice.authorized_at.isoformat() if invoice.authorized_at else None,
         items=[
@@ -3358,6 +3360,12 @@ def create_shipping_invoice(request, payload: ShippingInvoiceCreateSchema):
         Order, order_number__iexact=payload.order_number.strip()
     )
 
+    # Auto-generate sr_no if not provided (incremental from last entered)
+    sr_no = payload.sr_no
+    if sr_no is None:
+        last_sr = ShippingInvoice.objects.exclude(sr_no__isnull=True).order_by('-sr_no').first()
+        sr_no = (last_sr.sr_no + 1) if last_sr else 1
+
     invoice = ShippingInvoice.objects.create(
         id=uuid.uuid4(),
         order=order,
@@ -3379,7 +3387,9 @@ def create_shipping_invoice(request, payload: ShippingInvoiceCreateSchema):
         waybill_remark=payload.waybill_remark,
         bill_of_lading_remark=payload.bill_of_lading_remark,
         bank=payload.bank,
-        sr_no=payload.sr_no,
+        sr_no=sr_no,
+        destination_contact_name=payload.destination_contact_name,
+        destination_contact_number=payload.destination_contact_number,
     )
 
     for item in payload.items:
@@ -3508,6 +3518,8 @@ def update_shipping_invoice(
     invoice.bill_of_lading_remark = payload.bill_of_lading_remark
     invoice.bank = payload.bank
     invoice.sr_no = payload.sr_no
+    invoice.destination_contact_name = payload.destination_contact_name
+    invoice.destination_contact_number = payload.destination_contact_number
     invoice.save()
 
     # Replace items
