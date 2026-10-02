@@ -19,6 +19,10 @@ SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "django-insecure-change-this-in
 
 DEBUG = os.environ.get("DJANGO_DEBUG", "false").lower() == "true"
 
+# AI assistant (read key from environment; never commit secrets)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.1-flash-lite")
+
 ALLOWED_HOSTS = os.environ.get("ALLOWED_HOSTS", "localhost,127.0.0.1,.herokuapp.com").split(",")
 
 SITE_ID = 1
