@@ -38,6 +38,8 @@ def build_response(plan: dict, rows: list, provenance: dict, admin: bool):
         return _capabilities_response(entity, rows, provenance)
     if op == "fulfilment":
         return _fulfilment_response(rows, provenance)
+    if op == "audit":
+        return _audit_response(plan, rows, provenance)
     singular, plural = _nouns(entity)
     date_range = plan.get("date_range") or {}
     period = _period_label(date_range)
@@ -358,6 +360,38 @@ def _fulfilment_response(rows: list, provenance: dict):
     viz = {"type": "none", "title": None, "x_key": None, "y_key": None,
            "series": []}
     return message, rows, viz
+
+
+def _audit_response(plan: dict, rows: list, provenance: dict):
+    missing = provenance.get("missing_order") or provenance.get("missing_purchase")
+    scope = provenance.get("scope", "")
+    if missing:
+        return (f"I couldn't find proforma {missing} in the records. "
+                f"Check the number and ask again."), [], _none_viz()
+    scope_label = f"Order {scope}" if scope and scope != "all" else "The proformas"
+    if not rows:
+        checked = provenance.get("checked") or {}
+        bits = []
+        if checked.get("orders"):
+            bits.append(f"{checked['orders']} sales orders")
+        if checked.get("purchases"):
+            bits.append(f"{checked['purchases']} purchases")
+        coverage = f" (checked {', '.join(bits)})" if bits else ""
+        return (f"{scope_label} all check out — every line matches its documents{coverage}."), \
+            [], _none_viz()
+    label = {"high": "needs attention", "medium": "worth checking",
+             "info": "for info"}.get
+    lines = [f"{scope_label} do not fully add up. "
+             f"{len(rows)} {'thing needs' if len(rows) == 1 else 'things need'} a look:"]
+    for row in rows[:10]:
+        lines.append(f"- {row.get('detail')} ({label(row.get('severity'), 'note')})")
+    first_ref = (rows[0].get("ref") or "").strip()
+    if first_ref:
+        lines += ["", f"Start with {first_ref}."]
+    lines += ["", "Want me to dig into any of these?"]
+    viz = {"type": "none", "title": None, "x_key": None, "y_key": None,
+           "series": []}
+    return "\n".join(lines), rows[:15], viz
 
 
 def _critical_response(rows: list, provenance: dict):

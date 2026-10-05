@@ -168,6 +168,9 @@ def llm_parse_message(message: str, history: list | None = None):
         "- Delivery progress ('how much of order X has been delivered', "
         "'what was delivered') means entity order (or dn for 'what was'), "
         "operation fulfilment for amounts, list of dn rows for item detail.\n"
+        "- Reconciliation questions (inconsistency, mismatch, reconcile, "
+        "discrepancy, tally, documents not matching, audit) mean operation "
+        "audit with entity order, purchase, or overview.\n"
         "- If genuinely ambiguous, return {\"entity\": null, \"question\": "
         "\"<one specific question naming the candidate areas>\"}.\n"
         "- Only use filters the user explicitly stated: numbers, quoted names, "
@@ -321,6 +324,15 @@ def rule_parse_message(message: str, history: list | None = None) -> tuple[dict 
     cap_trigger = bool(re.search(
         r"what can you\b|what do you know|your capabilit|list your skills", low))
     has_context = bool(last_plan.get("entity") or ctx.get("entity"))
+    audit_trigger = bool(re.search(
+        r"\binconsist|\bmismatch|\breconcil|\bdiscrepanc|\btally\b|\btalies\b"
+        r"|\bdon't match\b|\bdoesn't match\b|\bdo not match\b|\bnot agree\b"
+        r"|\bout of balance\b|\bdifference between\b|\bmatch\b|\bmatches\b|\bmatching\b"
+        r"|\bcheck\b.*\b(problem|issue|error)"
+        r"|\baudit\b", low))
+    if audit_trigger and entity is None and not has_context:
+        # "Check M9001 for mismatches" names no category: infer the side.
+        entity = _audit_entity(text, low)
     if critical_trigger and entity is None and not has_context:
         # "tell me something critical" names nothing: scan the whole business.
         return _direct_plan("overview", "advise")
@@ -385,6 +397,18 @@ def rule_parse_message(message: str, history: list | None = None) -> tuple[dict 
     if decision_trigger and entity in ADVISABLE_ENTITIES and operation != "forecast":
         # "help me make a decision for sales": scoped analysis, not a bare count.
         operation, field, group_by = "advise", None, "month"
+    if audit_trigger and operation != "forecast":
+        # Proforma-vs-documents reconciliation beats generic analysis.
+        if entity not in ("order", "purchase", "overview"):
+            if re.search(r"\bdeliver|\bdn\b|\bdispatch\b|\binvoice\b|\bshipping\b"
+                         r"|\bcustomer\b|\bsale\b|\border\b", low):
+                entity = "order"
+            elif re.search(r"\breceipt\b|\bgrn\b|\bsupplier\b|\bvendor\b"
+                           r"|\bpurchase\b|\bbuy\b", low):
+                entity = "purchase"
+            else:
+                entity = "overview"
+        operation, field, group_by = "audit", None, None
     if critical_trigger:
         # Cross-business urgency scan, even mid-conversation.
         entity, operation, field, group_by = "overview", "advise", None, None
@@ -451,6 +475,19 @@ def rule_parse_message(message: str, history: list | None = None) -> tuple[dict 
             "Do you want a specific date range, customer/supplier, or order number?"
         )
     return plan, confidence, "rule-based"
+
+
+def _audit_entity(text: str, low: str) -> str:
+    """Which side to reconcile when the question names no category."""
+    upper = text.upper()
+    if "MPDDFZE" in upper or re.search(
+            r"\breceipt\b|\bgrn\b|\bsupplier\b|\bvendor\b|\bpurchase\b|\bbuy\b", low):
+        return "purchase"
+    if (re.search(r"\bM\d", upper) or re.search(r"\b\d{4,6}\b", text)
+            or re.search(r"\bdeliver|\bdn\b|\bdispatch\b|\binvoice\b|\bshipping\b"
+                         r"|\bcustomer\b|\bsale\b|\border\b", low)):
+        return "order"
+    return "overview"
 
 
 def _detect_entity(low: str, exclude: tuple = ()) -> str | None:

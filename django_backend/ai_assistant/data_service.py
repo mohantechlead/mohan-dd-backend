@@ -28,6 +28,8 @@ def _tool_name(entity: str, operation: str) -> str:
     }.get(entity, f"search_{entity}")
     if operation == "fulfilment":
         return "get_order_fulfilment"
+    if operation == "audit":
+        return "audit_proforma"
     if operation == "forecast":
         return f"forecast_{entity}"
     if operation == "advise":
@@ -55,6 +57,8 @@ def execute_plan(plan: dict, admin: bool = False, max_rows: int = 500):
             rows, provenance = _advise(plan)
     elif plan["operation"] == "fulfilment":
         rows, provenance = _fulfilment(plan)
+    elif plan["operation"] == "audit":
+        rows, provenance = _audit(plan)
     else:
         entity = plan["entity"]
         handler = _HANDLERS[entity]
@@ -1010,6 +1014,186 @@ def _critical():
     spotlight = [issue[3] for issue in issues[:3] if issue[3].get("ref")]
     return spotlight, {"source": "live cross-business scan (read-only)",
                        "issues": [(headline, suggestion) for _, headline, suggestion, _ in issues[:3]]}
+
+
+_TOLERANCE = 1e-6
+
+
+def _sum_by_name(lines, qty_attr="quantity"):
+    totals: dict = {}
+    for line in lines:
+        name = (getattr(line, "item_name", "") or "").strip().lower()
+        totals[name] = totals.get(name, 0.0) + float(getattr(line, qty_attr, 0) or 0)
+    return totals
+
+
+def _finding(severity: str, area: str, detail: str, ref: str = "") -> dict:
+    return {"severity": severity, "area": area, "detail": detail, "ref": ref}
+
+
+def _audit(plan, max_rows=500):
+    """Proforma-vs-documents reconciliation. Read-only throughout."""
+    from inventory.models import Order, Purchase
+
+    filters = plan.get("filters") or {}
+    order_ref = (filters.get("order_number") or "").strip() or None
+    order_like = str(filters.get("order_number_contains") or "").strip() or None
+    purchase_ref = (filters.get("purchase_number") or "").strip() or None
+
+    if order_ref or order_like:
+        order = None
+        if order_ref:
+            order = Order.objects.prefetch_related("items").filter(
+                order_number__iexact=order_ref).first()
+        if order is None and order_like:
+            order = Order.objects.prefetch_related("items").filter(
+                order_number__icontains=order_like).order_by("order_number").first()
+        if order is None:
+            return [], {"source": "proforma audit (read-only)",
+                        "missing_order": order_ref or order_like}
+        return _audit_order(order)
+    if purchase_ref:
+        purchase = Purchase.objects.prefetch_related("items").filter(
+            purchase_number__iexact=purchase_ref).first()
+        if purchase is None:
+            return [], {"source": "proforma audit (read-only)",
+                        "missing_purchase": purchase_ref}
+        return _audit_purchase(purchase)
+
+    findings, checked = [], {"orders": 0, "purchases": 0}
+    if plan.get("entity") in ("order", "overview"):
+        for order in Order.objects.prefetch_related("items").order_by("order_number")[:200]:
+            rows, _ = _audit_order(order)
+            for row in rows:
+                row = dict(row)
+                row["detail"] = f"{order.order_number}: {row['detail']}"
+                row["ref"] = row.get("ref") or order.order_number
+                findings.append(row)
+            checked["orders"] += 1
+            if len(findings) >= 15:
+                break
+    if plan.get("entity") in ("purchase", "overview"):
+        for purchase in Purchase.objects.prefetch_related("items").order_by("purchase_number")[:200]:
+            rows, _ = _audit_purchase(purchase)
+            for row in rows:
+                row = dict(row)
+                row["detail"] = f"{purchase.purchase_number}: {row['detail']}"
+                row["ref"] = row.get("ref") or purchase.purchase_number
+                findings.append(row)
+            checked["purchases"] += 1
+            if len(findings) >= 15:
+                break
+    findings.sort(key=lambda r: {"high": 0, "medium": 1, "info": 2}.get(r["severity"], 3))
+    return findings[:15], {"source": "proforma audit across live records (read-only)",
+                           "checked": checked, "scope": "all"}
+
+
+def _audit_order(order):
+    from inventory.models import DN, ShippingInvoice
+    findings = []
+    ordered = _sum_by_name(order.items.all())
+    invoices = list(ShippingInvoice.objects.filter(order=order).prefetch_related("items"))
+    invoiced: dict = {}
+    for inv in invoices:
+        for name, qty in _sum_by_name(inv.items.all()).items():
+            invoiced[name] = invoiced.get(name, 0.0) + qty
+    dns = list(DN.objects.filter(sales_no__iexact=order.order_number).prefetch_related("dn_items"))
+    delivered: dict = {}
+    for dn in dns:
+        for name, qty in _sum_by_name(dn.dn_items.all()).items():
+            delivered[name] = delivered.get(name, 0.0) + qty
+
+    invoice_numbers = {inv.invoice_number.lower() for inv in invoices}
+    for dn in dns:
+        ref = (dn.invoice_no or "").strip()
+        if ref and ref.lower() not in invoice_numbers:
+            findings.append(_finding(
+                "high", "Missing invoice",
+                f"Delivery {dn.dn_no} mentions invoice {ref}, which does not exist "
+                f"for this order.", dn.dn_no))
+
+    for name in ordered:
+        nice = next((line.item_name for line in order.items.all()
+                     if (line.item_name or "").strip().lower() == name), name)
+        out_qty, inv_qty, del_qty = ordered[name], invoiced.get(name, 0.0), delivered.get(name, 0.0)
+        if inv_qty - out_qty > _TOLERANCE:
+            findings.append(_finding(
+                "high", "Over-invoiced",
+                f"{nice}: ordered {out_qty}, but invoices add up to {inv_qty}.", ""))
+        elif out_qty - inv_qty > _TOLERANCE:
+            findings.append(_finding(
+                "medium", "Not fully invoiced",
+                f"{nice}: ordered {out_qty}, but only {inv_qty} invoiced so far.", ""))
+        if del_qty - inv_qty > _TOLERANCE and inv_qty > 0:
+            findings.append(_finding(
+                "high", "Over-delivered",
+                f"{nice}: invoiced {inv_qty}, but {del_qty} already delivered.", ""))
+        elif inv_qty - del_qty > _TOLERANCE:
+            findings.append(_finding(
+                "medium", "Not fully delivered",
+                f"{nice}: invoiced {inv_qty}, but only {del_qty} delivered so far.", ""))
+
+    if invoices and not dns:
+        findings.append(_finding(
+            "info", "No deliveries yet",
+            f"{len(invoices)} invoice(s) exist but nothing has been delivered.", ""))
+    if not invoices and not dns and ordered:
+        findings.append(_finding(
+            "info", "No activity yet",
+            "Nothing invoiced or delivered against this order so far.", ""))
+    return findings, {"source": "order reconciliation (read-only)",
+                      "scope": order.order_number}
+
+
+def _audit_purchase(purchase):
+    from inventory.models import GIT, GRN, Purchase
+    findings = []
+    if not Purchase.objects.filter(pk=purchase.pk).exists():
+        return [_finding("high", "Missing proforma",
+                         f"Purchase {purchase.purchase_number} does not exist.")], \
+            {"source": "purchase reconciliation (read-only)",
+             "scope": purchase.purchase_number}
+    ordered = _sum_by_name(purchase.items.all())
+    grns = list(GRN.objects.filter(
+        purchase_no__iexact=purchase.purchase_number).prefetch_related("items"))
+    received: dict = {}
+    for grn in grns:
+        for name, qty in _sum_by_name(grn.items.all()).items():
+            received[name] = received.get(name, 0.0) + qty
+
+    for name in ordered:
+        nice = next((line.item_name for line in purchase.items.all()
+                     if (line.item_name or "").strip().lower() == name), name)
+        out_qty, rec_qty = ordered[name], received.get(name, 0.0)
+        if rec_qty - out_qty > _TOLERANCE:
+            findings.append(_finding(
+                "high", "Over-received",
+                f"{nice}: ordered {out_qty}, but {rec_qty} already received.", ""))
+        elif out_qty - rec_qty > _TOLERANCE:
+            findings.append(_finding(
+                "medium", "Not fully received",
+                f"{nice}: ordered {out_qty}, but only {rec_qty} received so far.", ""))
+    for extra in received:
+        if extra not in ordered:
+            findings.append(_finding(
+                "high", "Unknown item received",
+                f"Receipts mention an item not on the order.", ""))
+    for git in GIT.objects.filter(
+            purchase_no__iexact=purchase.purchase_number,
+            variance_quantity__gt=_TOLERANCE):
+        findings.append(_finding(
+            "medium" if git.variance_type == "decreased" else "high",
+            "Recorded variance",
+            f"{git.item_name}: {float(git.received_quantity or 0)} received vs "
+            f"{float(git.purchase_quantity or 0)} ordered "
+            f"({git.variance_type}).",
+            git.purchase_no))
+    if not grns and ordered:
+        findings.append(_finding(
+            "info", "No activity yet",
+            "Nothing received against this purchase so far.", ""))
+    return findings, {"source": "purchase reconciliation (read-only)",
+                      "scope": purchase.purchase_number}
 
 
 _HANDLERS = {

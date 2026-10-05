@@ -7,6 +7,7 @@ from ai_assistant.analytics import (
     _linear_projection,
     build_response,
 )
+from ai_assistant.permissions import is_admin, mask_row_for_role
 from ai_assistant.planner import _filters_grounded, _operation_fits, parse_message
 from ai_assistant.validators import validate_query_plan
 
@@ -89,6 +90,44 @@ class PlannerTests(SimpleTestCase):
             "can you help me make a decision for the sales and orders", [])
         self.assertEqual(plan["entity"], "order")
         self.assertEqual(plan["operation"], "advise")
+
+    def test_audit_single_order(self):
+        plan, _, _ = parse_message(
+            "Check M9001 for mismatches", [], use_llm=False)
+        self.assertEqual(plan["entity"], "order")
+        self.assertEqual(plan["operation"], "audit")
+        self.assertEqual(plan["filters"].get("order_number"), "M9001")
+
+    def test_audit_delivery_vs_invoice(self):
+        plan, _, _ = parse_message(
+            "Do the delivery notes match the invoices?", [], use_llm=False)
+        self.assertEqual(plan["operation"], "audit")
+        self.assertIn(plan["entity"], ("order", "overview"))
+
+    def test_audit_global_reconciliation(self):
+        plan, _, _ = parse_message(
+            "Reconcile all proformas with their documents", [], use_llm=False)
+        self.assertEqual(plan["operation"], "audit")
+
+    def test_audit_clean_bill(self):
+        from ai_assistant.analytics import build_response as _br
+        plan = {"entity": "order", "operation": "audit", "filters": {},
+                "date_range": {}, "chart": "none"}
+        message, _, _ = _br(plan, [], {"scope": "M9001"}, False)
+        self.assertIn("check out", message)
+
+    def test_audit_findings_message(self):
+        from ai_assistant.analytics import build_response as _br
+        plan = {"entity": "order", "operation": "audit", "filters": {},
+                "date_range": {}, "chart": "none"}
+        rows = [{"severity": "high", "area": "Over-delivered",
+                 "detail": "PVC: invoiced 80, delivered 82.", "ref": "DN1"},
+                {"severity": "medium", "area": "Not fully invoiced",
+                 "detail": "Cement: ordered 40, invoiced 0.", "ref": ""}]
+        message, data, _ = _br(plan, rows, {"scope": "M9001"}, False)
+        self.assertIn("do not fully add up", message)
+        self.assertIn("Start with DN1", message)
+        self.assertEqual(len(data), 2)
 
     def test_tell_me_about_payments(self):
         plan, _, _ = parse_message("Tell me about payments.", [], use_llm=False)
@@ -322,3 +361,37 @@ class AnalyticsTests(SimpleTestCase):
         self.assertIn("What I would do next", message)
         self.assertEqual(viz["type"], "line")
         self.assertEqual(data, provenance["spotlight"])
+
+
+class PermissionTests(SimpleTestCase):
+    def _request(self, role=None, authenticated=True, superuser=False):
+        from types import SimpleNamespace
+        user = SimpleNamespace(
+            role=role, is_authenticated=authenticated,
+            is_superuser=superuser)
+        return SimpleNamespace(user=user)
+
+    def test_every_role_counts_as_non_admin_but_allowed(self):
+        for role in ("admin", "sales", "purchasing", "inventory",
+                     "logistics", "store", "accounting"):
+            request = self._request(role=role)
+            # No role is blocked: JWTAuth admits every role; only the
+            # admin flag changes masking, never access.
+            self.assertEqual(is_admin(request), role == "admin")
+
+    def test_anonymous_is_not_admin(self):
+        from types import SimpleNamespace
+        from django.contrib.auth.models import AnonymousUser
+        self.assertFalse(is_admin(SimpleNamespace(user=AnonymousUser())))
+
+    def test_status_masked_for_non_admin(self):
+        row = {"order_number": "M9001", "status": "pending",
+               "approved_by": "boss"}
+        masked = mask_row_for_role(row, admin=False)
+        self.assertIsNone(masked["status"])
+        self.assertIsNone(masked["approved_by"])
+        self.assertEqual(masked["order_number"], "M9001")
+
+    def test_status_visible_for_admin(self):
+        row = {"order_number": "M9001", "status": "pending"}
+        self.assertEqual(mask_row_for_role(row, admin=True)["status"], "pending")

@@ -4,6 +4,7 @@ import logging
 import uuid
 
 from ninja import Router
+from ninja_jwt.authentication import JWTAuth
 
 from .analytics import build_response
 from .context import ENTITIES, ENTITY_NOUNS
@@ -26,7 +27,7 @@ router = Router()
 _CONVERSATIONS: dict[str, list] = {}
 
 
-@router.get("/context")
+@router.get("/context", auth=JWTAuth())
 def ai_context(request):
     """Safe, read-only entity metadata for clients/debugging. No PII."""
     return {
@@ -40,7 +41,7 @@ def ai_context(request):
     }
 
 
-@router.post("/chat", response=ChatResponseSchema)
+@router.post("/chat", response=ChatResponseSchema, auth=JWTAuth())
 def ai_chat(request, payload: ChatRequestSchema):
     conversation_id = payload.conversation_id or new_conversation_id()
     history = _CONVERSATIONS.get(conversation_id, [])
@@ -64,7 +65,7 @@ def ai_chat(request, payload: ChatRequestSchema):
             rows, provenance = execute_plan(plan, admin=admin)
             message, data, viz = build_response(plan, rows, provenance, admin)
             record_count = _record_count(plan, rows)
-            if plan.get("operation") in ("brief", "advise", "capabilities"):
+            if plan.get("operation") in ("brief", "advise", "capabilities", "audit"):
                 # Composed answers; polishing would shrink them away.
                 polished = None
             else:

@@ -218,7 +218,8 @@ ENTITY_NOUNS = {
 
 EXAMPLE_QUESTIONS = {
     "order": ["How many orders this month?", "Which customers order most?",
-              "Predict next month orders", "Help me decide on sales orders"],
+              "Predict next month orders", "Help me decide on sales orders",
+              "Check M9001 for mismatches"],
     "purchase": ["How many purchases are pending?", "Monthly buying trend",
                  "Help me decide on purchases"],
     "shipping_invoice": ["Show me invoice A9001", "Which invoices wait for authorization?"],

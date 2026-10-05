@@ -21,7 +21,7 @@ from .context import ENTITIES, FORECASTABLE_ENTITIES, FORBIDDEN_FIELDS
 ALLOWED_OPERATIONS = {
     "count", "sum", "avg", "min", "max",
     "list", "group_count", "group_sum", "top_n",
-    "brief", "forecast", "advise", "capabilities", "fulfilment",
+    "brief", "forecast", "advise", "capabilities", "fulfilment", "audit",
 }
 
 ALLOWED_CHARTS = {"bar", "line", "pie", "scatter", "none"}
@@ -74,6 +74,13 @@ def validate_query_plan(plan: dict) -> tuple[bool, str]:
         filters = plan.get("filters") or {}
         if not filters.get("order_number") and not filters.get("order_number_contains"):
             return False, "Which order should I check? Give me an order number."
+        return True, ""
+    if operation == "audit":
+        if entity not in ("order", "purchase", "overview"):
+            return False, (
+                "I can check sales orders or purchases against their documents. "
+                "Which proforma should I check?"
+            )
         return True, ""
     if entity in FORBIDDEN_FIELDS:
         return False, "That entity is not available to the assistant."
