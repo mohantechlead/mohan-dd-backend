@@ -3334,6 +3334,7 @@ def _shipping_invoice_to_detail_schema(invoice: ShippingInvoice):
         bill_of_lading_remark=invoice.bill_of_lading_remark,
         bank=invoice.bank,
         sr_no=invoice.sr_no,
+        destination=invoice.destination,
         destination_contact_name=invoice.destination_contact_name,
         destination_contact_number=invoice.destination_contact_number,
         authorized_by=invoice.authorized_by,
@@ -3388,6 +3389,7 @@ def create_shipping_invoice(request, payload: ShippingInvoiceCreateSchema):
         bill_of_lading_remark=payload.bill_of_lading_remark,
         bank=payload.bank,
         sr_no=sr_no,
+        destination=payload.destination,
         destination_contact_name=payload.destination_contact_name,
         destination_contact_number=payload.destination_contact_number,
     )
@@ -3436,6 +3438,7 @@ def create_shipping_invoice(request, payload: ShippingInvoiceCreateSchema):
         reference_no=invoice.reference_no,
         final_price=float(invoice.final_price) if invoice.final_price is not None else None,
         sr_no=invoice.sr_no,
+        destination=invoice.destination,
         destination_contact_name=invoice.destination_contact_name,
         destination_contact_number=invoice.destination_contact_number,
     )
@@ -3462,6 +3465,7 @@ def list_shipping_invoices(request, order_number: Optional[str] = None):
                 authorized_by=inv.authorized_by,
                 authorized_at=inv.authorized_at.isoformat() if inv.authorized_at else None,
                 sr_no=inv.sr_no,
+                destination=inv.destination,
                 destination_contact_name=inv.destination_contact_name,
                 destination_contact_number=inv.destination_contact_number,
             )
@@ -3524,6 +3528,7 @@ def update_shipping_invoice(
     invoice.bill_of_lading_remark = payload.bill_of_lading_remark
     invoice.bank = payload.bank
     invoice.sr_no = payload.sr_no
+    invoice.destination = payload.destination
     invoice.destination_contact_name = payload.destination_contact_name
     invoice.destination_contact_number = payload.destination_contact_number
     invoice.save()

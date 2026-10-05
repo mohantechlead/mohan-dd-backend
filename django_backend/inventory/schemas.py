@@ -667,6 +667,7 @@ class ShippingInvoiceCreateSchema(Schema):
     bill_of_lading_remark: Optional[str]
     bank: Optional[str] = None
     sr_no: Optional[int] = None
+    destination: Optional[str] = None
     destination_contact_name: Optional[str] = None
     destination_contact_number: Optional[str] = None
     items: List[ShippingInvoiceItemCreateSchema]
@@ -692,6 +693,7 @@ class ShippingInvoiceUpdateSchema(Schema):
     bill_of_lading_remark: Optional[str]
     bank: Optional[str] = None
     sr_no: Optional[int] = None
+    destination: Optional[str] = None
     destination_contact_name: Optional[str] = None
     destination_contact_number: Optional[str] = None
     items: List[ShippingInvoiceItemCreateSchema]
@@ -707,6 +709,7 @@ class ShippingInvoiceSummarySchema(Schema):
     authorized_by: Optional[str] = None
     authorized_at: Optional[str] = None
     sr_no: Optional[int] = None
+    destination: Optional[str] = None
     destination_contact_name: Optional[str] = None
     destination_contact_number: Optional[str] = None
 
@@ -753,6 +756,7 @@ class ShippingInvoiceDetailSchema(Schema):
     bill_of_lading_remark: Optional[str]
     bank: Optional[str] = None
     sr_no: Optional[int] = None
+    destination: Optional[str] = None
     destination_contact_name: Optional[str] = None
     destination_contact_number: Optional[str] = None
     authorized_by: Optional[str] = None
