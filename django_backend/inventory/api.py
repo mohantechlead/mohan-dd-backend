@@ -3435,6 +3435,9 @@ def create_shipping_invoice(request, payload: ShippingInvoiceCreateSchema):
         invoice_date=invoice.invoice_date,
         reference_no=invoice.reference_no,
         final_price=float(invoice.final_price) if invoice.final_price is not None else None,
+        sr_no=invoice.sr_no,
+        destination_contact_name=invoice.destination_contact_name,
+        destination_contact_number=invoice.destination_contact_number,
     )
 
 
@@ -3458,6 +3461,9 @@ def list_shipping_invoices(request, order_number: Optional[str] = None):
                 final_price=float(inv.final_price) if inv.final_price is not None else None,
                 authorized_by=inv.authorized_by,
                 authorized_at=inv.authorized_at.isoformat() if inv.authorized_at else None,
+                sr_no=inv.sr_no,
+                destination_contact_name=inv.destination_contact_name,
+                destination_contact_number=inv.destination_contact_number,
             )
         )
     return result

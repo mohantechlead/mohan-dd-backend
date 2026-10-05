@@ -706,6 +706,9 @@ class ShippingInvoiceSummarySchema(Schema):
     final_price: Optional[float] = None
     authorized_by: Optional[str] = None
     authorized_at: Optional[str] = None
+    sr_no: Optional[int] = None
+    destination_contact_name: Optional[str] = None
+    destination_contact_number: Optional[str] = None
 
 
 class ShippingInvoiceItemSchema(Schema):
