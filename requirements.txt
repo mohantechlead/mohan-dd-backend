@@ -19,3 +19,5 @@ gunicorn
 dj-database-url
 whitenoise
 google-generativeai
+django-storages[s3]
+boto3

@@ -198,6 +198,35 @@ MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
 
 # ==============================
+# File storage: S3/MinIO or local disk
+# ==============================
+
+# Storage: set USE_S3=True for AWS S3 (or MinIO), False for local disk.
+USE_S3 = os.environ.get("USE_S3", "false").lower() == "true"
+AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID", "minioadmin")
+AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "minioadmin")
+AWS_STORAGE_BUCKET_NAME = os.environ.get("AWS_STORAGE_BUCKET_NAME", "documents")
+AWS_S3_ENDPOINT_URL = os.environ.get("AWS_S3_ENDPOINT_URL", "http://localhost:9000")
+AWS_S3_REGION_NAME = os.environ.get("AWS_S3_REGION_NAME", "us-east-1")
+# MinIO (and path-style endpoints generally) needs path addressing; AWS S3 works with either.
+AWS_S3_ADDRESSING_STYLE = os.environ.get("AWS_S3_ADDRESSING_STYLE", "path")
+AWS_DEFAULT_ACL = None  # keep uploaded objects private; URLs are signed
+AWS_QUERYSTRING_AUTH = True  # expire signed file URLs
+
+STORAGES = {
+    "default": {
+        "BACKEND": (
+            "storages.backends.s3.S3Storage"
+            if USE_S3
+            else "django.core.files.storage.FileSystemStorage"
+        ),
+    },
+    "staticfiles": {
+        "BACKEND": "whitenoise.storage.CompressedManifestStaticFilesStorage",
+    },
+}
+
+# ==============================
 # Default PK
 # ==============================
 
@@ -279,4 +308,6 @@ NINJA_JWT = {
 # ==============================
 
 if django_heroku:
-    django_heroku.settings(locals())
+    # staticfiles=False: STORAGES above already configures whitenoise;
+    # django-heroku would otherwise set STATICFILES_STORAGE (mutually exclusive).
+    django_heroku.settings(locals(), staticfiles=False)

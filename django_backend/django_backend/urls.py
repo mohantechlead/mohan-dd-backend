@@ -15,6 +15,8 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 from django.contrib import admin
+from django.conf import settings
+from django.conf.urls.static import static
 from django.http import JsonResponse
 from django.urls import path
 from .api import api
@@ -35,3 +37,7 @@ urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/", api.urls),
 ]
+
+# Serve uploaded media from local disk in DEBUG (S3/MinIO serves its own URLs).
+if settings.DEBUG and not settings.USE_S3:
+    urlpatterns += static(settings.MEDIA_URL, document_root=settings.MEDIA_ROOT)
