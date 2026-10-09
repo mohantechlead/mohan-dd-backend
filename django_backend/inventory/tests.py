@@ -245,3 +245,242 @@ class MovementComparisonTests(TestCase):
         self.assertEqual(_normalize_comparison_variance(0.0008, "MT"), 0.0)
         self.assertEqual(_normalize_comparison_variance(-0.001, "MT"), 0.0)
         self.assertEqual(_normalize_comparison_variance(0.025, "MT"), 0.025)
+
+
+class PurchaseCheckpointTests(TestCase):
+    def setUp(self):
+        import json
+
+        from django.contrib.auth import get_user_model
+
+        from inventory.models import Purchase
+
+        self.User = get_user_model()
+        self.Purchase = Purchase
+
+        def make_user(username, role):
+            user = self.User.objects.create_user(username=username, password="Passw0rd!")
+            user.role = role
+            user.save()
+            return user
+
+        self.admin = make_user("pc_admin", "admin")
+        self.sales = make_user("pc_sales", "sales")
+        self.transitor = make_user("pc_transitor", "transitor")
+        self.transitor2 = make_user("pc_transitor2", "transitor")
+        self.purchasing = make_user("pc_purchasing", "purchasing")
+        self.inactive_transitor = make_user("pc_inactive", "transitor")
+        self.inactive_transitor.is_active = False
+        self.inactive_transitor.save()
+
+        self.purchase = self._make_purchase("MPDDFZE901")
+        self.other_purchase = self._make_purchase("MPDDFZE902")
+
+        from django.test import Client
+
+        self.client = Client()
+        self._json = json
+
+    def _make_purchase(self, purchase_number):
+        return self.Purchase.objects.create(
+            purchase_number=purchase_number,
+            proforma_ref_no="PF-" + purchase_number[-3:],
+            buyer="Checkpoint Buyer",
+            order_date=date.today(),
+            shipper="Checkpoint Shipper",
+            country_of_origin="China",
+            final_destination="Ethiopia",
+            port_of_loading="Shanghai",
+            port_of_discharge="Djibouti",
+            payment_terms="TT",
+            mode_of_transport="Sea",
+            shipment_type="LCL",
+            status="pending",
+        )
+
+    def _auth_headers(self, username, password="Passw0rd!"):
+        resp = self.client.post(
+            "/api/token/pair",
+            data=self._json.dumps({"username": username, "password": password}),
+            content_type="application/json",
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        token = resp.json()["access"]
+        return {"HTTP_AUTHORIZATION": "Bearer " + token}
+
+    def _post_stage(self, purchase_number, body, username):
+        return self.client.post(
+            "/api/inventory/purchases/" + purchase_number + "/stage",
+            data=self._json.dumps(body),
+            content_type="application/json",
+            **self._auth_headers(username),
+        )
+
+    def _post_assign(self, purchase_number, body, username):
+        return self.client.post(
+            "/api/inventory/purchases/" + purchase_number + "/assign-transitor",
+            data=self._json.dumps(body),
+            content_type="application/json",
+            **self._auth_headers(username),
+        )
+
+    def test_transitor_advances_one_step_forward(self):
+        self.purchase.assigned_transitor = self.transitor
+        self.purchase.save()
+
+        resp = self._post_stage("MPDDFZE901", {"stage": "ecd_im8"}, "pc_transitor")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        data = resp.json()
+        self.assertEqual(data["stage"], "ecd_im8")
+        self.assertEqual(data["stage_label"], "ECD / IM8")
+        self.assertEqual(data["stage_updated_by"], "pc_transitor")
+        self.assertEqual(data["assigned_transitor"], "pc_transitor")
+        self.assertIsNotNone(data["stage_updated_at"])
+
+        resp = self._post_stage("MPDDFZE901", {"stage": "transit_permit"}, "pc_transitor")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()["stage"], "transit_permit")
+        self.assertEqual(resp.json()["stage_label"], "Transit Permit")
+
+    def test_transitor_blocked_from_closing_and_cancelling(self):
+        self.purchase.assigned_transitor = self.transitor
+        self.purchase.stage = "transit_permit"
+        self.purchase.save()
+
+        resp = self._post_stage("MPDDFZE901", {"stage": "closed"}, "pc_transitor")
+        self.assertEqual(resp.status_code, 403)
+        self.assertIn("closed or cancelled", resp.json()["detail"])
+
+        resp = self._post_stage("MPDDFZE901", {"stage": "cancelled"}, "pc_transitor")
+        self.assertEqual(resp.status_code, 403)
+        self.assertIn("closed or cancelled", resp.json()["detail"])
+
+    def test_transitor_blocked_from_skipping_steps(self):
+        self.purchase.assigned_transitor = self.transitor
+        self.purchase.save()
+
+        resp = self._post_stage("MPDDFZE901", {"stage": "transit_permit"}, "pc_transitor")
+        self.assertEqual(resp.status_code, 403)
+
+    def test_transitor_blocked_from_non_assigned_purchase(self):
+        self.other_purchase.assigned_transitor = self.transitor2
+        self.other_purchase.save()
+
+        resp = self._post_stage("MPDDFZE901", {"stage": "ecd_im8"}, "pc_transitor")
+        self.assertEqual(resp.status_code, 403)
+        self.assertIn("not assigned", resp.json()["detail"])
+
+    def test_other_role_blocked_from_stage(self):
+        resp = self._post_stage("MPDDFZE901", {"stage": "ecd_im8"}, "pc_purchasing")
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.json()["detail"], "Not permitted.")
+
+    def test_invalid_stage_value_rejected(self):
+        resp = self._post_stage("MPDDFZE901", {"stage": "bogus"}, "pc_sales")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("Invalid stage value", resp.json()["detail"])
+
+    def test_sales_full_override_any_direction(self):
+        resp = self._post_stage("MPDDFZE901", {"stage": "closed"}, "pc_sales")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        data = resp.json()
+        self.assertEqual(data["stage"], "closed")
+        self.assertEqual(data["stage_label"], "Closed")
+        self.assertEqual(data["stage_updated_by"], "pc_sales")
+
+        resp = self._post_stage("MPDDFZE901", {"stage": None}, "pc_sales")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertIsNone(resp.json()["stage"])
+        self.assertIsNone(resp.json()["stage_label"])
+
+        resp = self._post_stage("MPDDFZE901", {"stage": "transit_permit"}, "pc_sales")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()["stage"], "transit_permit")
+
+    def test_admin_can_set_stage(self):
+        resp = self._post_stage("MPDDFZE901", {"stage": "cancelled"}, "pc_admin")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()["stage"], "cancelled")
+
+    def test_assign_transitor_and_unassign(self):
+        resp = self._post_assign(
+            "MPDDFZE901", {"transitor_id": self.transitor.id}, "pc_sales"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        data = resp.json()
+        self.assertEqual(data["assigned_transitor_id"], self.transitor.id)
+        self.assertEqual(data["assigned_transitor"], "pc_transitor")
+
+        resp = self._post_assign("MPDDFZE901", {"transitor_id": None}, "pc_sales")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertIsNone(resp.json()["assigned_transitor_id"])
+        self.assertIsNone(resp.json()["assigned_transitor"])
+
+    def test_assign_to_non_transitor_rejected(self):
+        resp = self._post_assign(
+            "MPDDFZE901", {"transitor_id": self.purchasing.id}, "pc_sales"
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("transitor role", resp.json()["detail"])
+
+    def test_assign_to_inactive_transitor_rejected(self):
+        resp = self._post_assign(
+            "MPDDFZE901", {"transitor_id": self.inactive_transitor.id}, "pc_sales"
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("not active", resp.json()["detail"])
+
+    def test_assign_non_sales_role_blocked(self):
+        resp = self._post_assign(
+            "MPDDFZE901", {"transitor_id": self.transitor.id}, "pc_purchasing"
+        )
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.json()["detail"], "Not permitted.")
+
+    def test_my_transits_scoped_per_user(self):
+        self.purchase.assigned_transitor = self.transitor
+        self.purchase.save()
+        self.other_purchase.assigned_transitor = self.transitor2
+        self.other_purchase.save()
+
+        resp = self.client.get(
+            "/api/inventory/purchases/my-transits",
+            **self._auth_headers("pc_transitor"),
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        numbers = [p["purchase_number"] for p in resp.json()]
+        self.assertEqual(numbers, ["MPDDFZE901"])
+
+        resp = self.client.get(
+            "/api/inventory/purchases/my-transits",
+            **self._auth_headers("pc_transitor2"),
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        numbers = [p["purchase_number"] for p in resp.json()]
+        self.assertEqual(numbers, ["MPDDFZE902"])
+
+    def test_users_transitors_role_gate_and_listing(self):
+        resp = self.client.get(
+            "/api/partners/users/transitors",
+            **self._auth_headers("pc_purchasing"),
+        )
+        self.assertEqual(resp.status_code, 403)
+        self.assertEqual(resp.json()["detail"], "Not permitted.")
+
+        resp = self.client.get("/api/partners/users/transitors")
+        self.assertEqual(resp.status_code, 401)
+
+        resp = self.client.get(
+            "/api/partners/users/transitors",
+            **self._auth_headers("pc_sales"),
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        usernames = [u["username"] for u in resp.json()]
+        self.assertEqual(usernames, ["pc_transitor", "pc_transitor2"])
+
+        resp = self.client.get(
+            "/api/partners/users/transitors",
+            **self._auth_headers("pc_admin"),
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(len(resp.json()), 2)

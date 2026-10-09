@@ -13,7 +13,7 @@ router = Router()
 
 User = get_user_model()
 
-ROLE_CHOICES = ["admin", "sales", "purchasing", "inventory", "logistics", "store", "accounting"]
+ROLE_CHOICES = ["admin", "sales", "purchasing", "inventory", "logistics", "store", "accounting", "transitor"]
 
 
 def _require_admin(request):
@@ -25,6 +25,17 @@ def _require_admin(request):
     if role != "admin" and not getattr(user, "is_superuser", False):
         return JsonResponse({"detail": "Admin role required."}, status=403)
     return None
+
+
+def _require_role(request, *roles):
+    """Return None if allowed, or JsonResponse with 401/403 if not."""
+    user = getattr(request, "user", None)
+    if not user or not user.is_authenticated:
+        return JsonResponse({"detail": "Authentication required."}, status=401)
+    role = getattr(user, "role", "logistics")
+    if role in roles or role == "admin" or getattr(user, "is_superuser", False):
+        return None
+    return JsonResponse({"detail": "Not permitted."}, status=403)
 
 
 class UserSchema(Schema):
@@ -78,6 +89,19 @@ def create_user(request, payload: UserCreateSchema):
     user.role = payload.role
     user.save()
     return {"id": user.id, "username": user.username, "email": user.email or None, "role": user.role, "is_active": user.is_active}
+
+
+class TransitorSchema(Schema):
+    id: int
+    username: str
+
+
+@router.get("/users/transitors", response=List[TransitorSchema], auth=JWTAuth())
+def list_transitors(request):
+    err = _require_role(request, "sales")
+    if err:
+        return err
+    return list(User.objects.filter(role="transitor", is_active=True).order_by("username"))
 
 
 @router.get("/users/{user_id}", response=UserSchema, auth=JWTAuth())
