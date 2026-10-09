@@ -104,7 +104,6 @@ from .schemas import (
     PurchaseApproveSchema,
     PurchaseStatusUpdateSchema,
     PurchaseUpdateSchema,
-    PurchaseStageUpdateSchema,
     PurchaseAssignTransitorSchema,
     MarineInsuranceSchema,
     MarineInsuranceCreateSchema,
@@ -117,7 +116,9 @@ from .schemas import (
     ShippingInvoiceUpdateSchema,
 )
 import uuid
-from django.http import JsonResponse
+import json
+import os
+from django.http import FileResponse, JsonResponse
 import traceback
 from django.db.models import Sum
 from django.utils import timezone
@@ -3013,8 +3014,38 @@ def list_my_transits(request):
     return [_purchase_to_detail_schema(p, request) for p in purchases]
 
 
+_PURCHASE_STAGE_FILE_FIELDS = {
+    "ecd": "ecd_file",
+    "transit_permit": "transit_permit_file",
+}
+_MAX_STAGE_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB
+
+
+def _parse_stage_update_body(request):
+    """Parse the stage update body (JSON or multipart).
+
+    Returns (stage, ecd_upload, transit_upload, error_response). At most one of
+    the error response is not None; the other values are then meaningless.
+    """
+    ctype = (request.content_type or "").split(";")[0].strip().lower()
+    if ctype == "multipart/form-data":
+        raw = request.POST.get("stage")
+        stage = None if raw in (None, "", "null") else raw
+        return stage, request.FILES.get("ecd_file"), request.FILES.get("transit_permit_file"), None
+    try:
+        payload = json.loads(request.body or b"{}")
+    except (ValueError, UnicodeDecodeError):
+        return None, None, None, JsonResponse({"detail": "Invalid request body."}, status=400)
+    if not isinstance(payload, dict):
+        return None, None, None, JsonResponse({"detail": "Invalid request body."}, status=400)
+    stage = payload.get("stage")
+    if stage == "":
+        stage = None
+    return stage, None, None, None
+
+
 @router.post("/purchases/{purchase_number}/stage", response=PurchaseDetailSchema, auth=JWTAuth())
-def update_purchase_stage(request, purchase_number: str, payload: PurchaseStageUpdateSchema):
+def update_purchase_stage(request, purchase_number: str):
     user = getattr(request, "user", None)
     if not user or not user.is_authenticated:
         return JsonResponse({"detail": "Authentication required."}, status=401)
@@ -3024,7 +3055,9 @@ def update_purchase_stage(request, purchase_number: str, payload: PurchaseStageU
     if not is_admin_or_sales and not is_transitor:
         return JsonResponse({"detail": "Not permitted."}, status=403)
 
-    stage = payload.stage
+    stage, ecd_upload, permit_upload, parse_err = _parse_stage_update_body(request)
+    if parse_err is not None:
+        return parse_err
     if stage is not None and stage not in _PURCHASE_ALLOWED_STAGES:
         return JsonResponse(
             {
@@ -3037,6 +3070,13 @@ def update_purchase_stage(request, purchase_number: str, payload: PurchaseStageU
             status=400,
         )
 
+    for uploaded in (ecd_upload, permit_upload):
+        if uploaded is not None and uploaded.size > _MAX_STAGE_UPLOAD_BYTES:
+            return JsonResponse(
+                {"detail": "File too large. Maximum allowed size is 25 MB."},
+                status=400,
+            )
+
     purchase = get_object_or_404(
         Purchase.objects.prefetch_related("items"),
         purchase_number__iexact=purchase_number.strip(),
@@ -3048,19 +3088,23 @@ def update_purchase_stage(request, purchase_number: str, payload: PurchaseStageU
                 {"detail": "You are not assigned as the transitor for this purchase."},
                 status=403,
             )
-        if stage in ("closed", "cancelled"):
+        if stage in ("done", "cancelled"):
             return JsonResponse(
-                {"detail": "Transitors cannot set the stage to closed or cancelled."},
+                {"detail": "Transitors cannot set the stage to done or cancelled."},
                 status=403,
             )
-        allowed_next = {None: "ecd_im8", "ecd_im8": "transit_permit"}
+        allowed_next = {
+            None: "ecd_im8",
+            "ecd_im8": "transit_permit",
+            "transit_permit": "closure_guarantee",
+        }
         next_stage = allowed_next.get(purchase.stage)
         if next_stage is None:
             return JsonResponse(
                 {
                     "detail": (
                         "Transitors can only advance the stage one step forward "
-                        "(not started -> ECD / IM8, then ECD / IM8 -> Transit Permit)."
+                        "(not started -> ECD / IM8 -> Transit Permit -> Closure Guarantee)."
                     )
                 },
                 status=403,
@@ -3071,11 +3115,73 @@ def update_purchase_stage(request, purchase_number: str, payload: PurchaseStageU
                 status=403,
             )
 
+    # ECD / IM8 document is required for every active checkpoint (any stage
+    # except "not started" and "cancelled").
+    if stage is not None and stage != "cancelled":
+        has_ecd = ecd_upload is not None or bool(purchase.ecd_file)
+        if not has_ecd:
+            label = _purchase_stage_label(stage) or stage
+            return JsonResponse(
+                {
+                    "detail": (
+                        'An ECD / IM8 file is required to set the checkpoint to "{0}". '
+                        "Please upload the ECD document.".format(label)
+                    )
+                },
+                status=400,
+            )
+
+    replaced_names = []
+    if ecd_upload is not None:
+        if purchase.ecd_file:
+            replaced_names.append(purchase.ecd_file.name)
+        purchase.ecd_file = ecd_upload
+        purchase.ecd_file_original_name = os.path.basename(ecd_upload.name or "")
+    if permit_upload is not None:
+        if purchase.transit_permit_file:
+            replaced_names.append(purchase.transit_permit_file.name)
+        purchase.transit_permit_file = permit_upload
+        purchase.transit_permit_file_original_name = os.path.basename(permit_upload.name or "")
+
     purchase.stage = stage
     purchase.stage_updated_at = timezone.now()
     purchase.stage_updated_by = user
     purchase.save()
+
+    # Remove replaced files directly through storage (FieldFile.delete would
+    # also clear the field on the in-memory instance, clobbering the new value).
+    storage = Purchase._meta.get_field("ecd_file").storage
+    for old_name in replaced_names:
+        try:
+            storage.delete(old_name)
+        except Exception:
+            logger.warning("Could not delete replaced checkpoint file: %s", old_name)
+
     return _purchase_to_detail_schema(purchase, request)
+
+
+@router.get("/purchases/{purchase_number}/files/{kind}", auth=JWTAuth())
+def download_purchase_file(request, purchase_number: str, kind: str):
+    user = getattr(request, "user", None)
+    if not user or not user.is_authenticated:
+        return JsonResponse({"detail": "Authentication required."}, status=401)
+    field = _PURCHASE_STAGE_FILE_FIELDS.get(kind)
+    if field is None:
+        return JsonResponse({"detail": "Unknown file kind."}, status=404)
+    purchase = get_object_or_404(
+        Purchase,
+        purchase_number__iexact=purchase_number.strip(),
+    )
+    stored = getattr(purchase, field)
+    if not stored:
+        return JsonResponse({"detail": "No file uploaded for this checkpoint."}, status=404)
+    original_name_field = field + "_original_name"
+    original_name = getattr(purchase, original_name_field, "") or os.path.basename(stored.name)
+    try:
+        stored.open("rb")
+    except (FileNotFoundError, ValueError, OSError):
+        return JsonResponse({"detail": "File not found on storage."}, status=404)
+    return FileResponse(stored.file, as_attachment=False, filename=original_name)
 
 
 @router.post("/purchases/{purchase_number}/assign-transitor", response=PurchaseDetailSchema, auth=JWTAuth())
@@ -3195,7 +3301,8 @@ def approve_purchase(request, purchase_number: str, payload: PurchaseApproveSche
 _PURCHASE_STAGE_LABELS = {
     "ecd_im8": "ECD / IM8",
     "transit_permit": "Transit Permit",
-    "closed": "Closed",
+    "closure_guarantee": "Closure Guarantee",
+    "done": "Done",
     "cancelled": "Cancelled",
 }
 _PURCHASE_ALLOWED_STAGES = tuple(_PURCHASE_STAGE_LABELS.keys())
@@ -3252,6 +3359,28 @@ def _purchase_to_detail_schema(purchase, request=None):
         assigned_transitor_id=purchase.assigned_transitor_id,
         assigned_transitor=purchase.assigned_transitor.username if purchase.assigned_transitor else None,
         stage_label=_purchase_stage_label(purchase.stage),
+        ecd_file_url=(
+            "/api/inventory/purchases/{0}/files/ecd".format(purchase.purchase_number)
+            if purchase.ecd_file
+            else None
+        ),
+        ecd_file_name=(
+            purchase.ecd_file_original_name
+            or os.path.basename(purchase.ecd_file.name)
+            if purchase.ecd_file
+            else None
+        ),
+        transit_permit_file_url=(
+            "/api/inventory/purchases/{0}/files/transit_permit".format(purchase.purchase_number)
+            if purchase.transit_permit_file
+            else None
+        ),
+        transit_permit_file_name=(
+            purchase.transit_permit_file_original_name
+            or os.path.basename(purchase.transit_permit_file.name)
+            if purchase.transit_permit_file
+            else None
+        ),
         items=[
             PurchaseItemSchema(
                 item_id=i.item_id,

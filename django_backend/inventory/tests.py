@@ -1,7 +1,10 @@
+import shutil
+import tempfile
 from datetime import date, timedelta
 from unittest.mock import MagicMock, patch
 
-from django.test import TestCase
+from django.core.files.uploadedfile import SimpleUploadedFile
+from django.test import TestCase, override_settings
 from django.utils import timezone
 
 from inventory.api import (
@@ -248,6 +251,19 @@ class MovementComparisonTests(TestCase):
 
 
 class PurchaseCheckpointTests(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls._media_dir = tempfile.mkdtemp(prefix="mohan_ckpt_media_")
+        cls._media_override = override_settings(MEDIA_ROOT=cls._media_dir)
+        cls._media_override.enable()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._media_override.disable()
+        shutil.rmtree(cls._media_dir, ignore_errors=True)
+        super().tearDownClass()
+
     def setUp(self):
         import json
 
@@ -316,6 +332,32 @@ class PurchaseCheckpointTests(TestCase):
             **self._auth_headers(username),
         )
 
+    def _post_stage_multipart(self, purchase_number, stage, username, ecd=None, permit=None):
+        data = {"stage": stage if stage is not None else ""}
+        if ecd is not None:
+            data["ecd_file"] = ecd
+        if permit is not None:
+            data["transit_permit_file"] = permit
+        return self.client.post(
+            "/api/inventory/purchases/" + purchase_number + "/stage",
+            data=data,
+            **self._auth_headers(username),
+        )
+
+    @staticmethod
+    def _ecd_file(name="ecd-doc.pdf", content=b"%PDF-1.4 ecd"):
+        return SimpleUploadedFile(name, content, content_type="application/pdf")
+
+    @staticmethod
+    def _permit_file(name="permit.pdf", content=b"%PDF-1.4 permit"):
+        return SimpleUploadedFile(name, content, content_type="application/pdf")
+
+    def _attach_ecd(self, purchase, name="ecd-doc.pdf", content=b"%PDF-1.4 ecd"):
+        purchase.ecd_file = self._ecd_file(name, content)
+        purchase.save()
+        purchase.refresh_from_db()
+        return purchase
+
     def _post_assign(self, purchase_number, body, username):
         return self.client.post(
             "/api/inventory/purchases/" + purchase_number + "/assign-transitor",
@@ -328,7 +370,14 @@ class PurchaseCheckpointTests(TestCase):
         self.purchase.assigned_transitor = self.transitor
         self.purchase.save()
 
+        # Entering ECD / IM8 without a file is rejected.
         resp = self._post_stage("MPDDFZE901", {"stage": "ecd_im8"}, "pc_transitor")
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("ECD / IM8 file is required", resp.json()["detail"])
+
+        resp = self._post_stage_multipart(
+            "MPDDFZE901", "ecd_im8", "pc_transitor", ecd=self._ecd_file()
+        )
         self.assertEqual(resp.status_code, 200, resp.content)
         data = resp.json()
         self.assertEqual(data["stage"], "ecd_im8")
@@ -336,24 +385,31 @@ class PurchaseCheckpointTests(TestCase):
         self.assertEqual(data["stage_updated_by"], "pc_transitor")
         self.assertEqual(data["assigned_transitor"], "pc_transitor")
         self.assertIsNotNone(data["stage_updated_at"])
+        self.assertIsNotNone(data["ecd_file_url"])
+        self.assertEqual(data["ecd_file_name"], "ecd-doc.pdf")
 
         resp = self._post_stage("MPDDFZE901", {"stage": "transit_permit"}, "pc_transitor")
         self.assertEqual(resp.status_code, 200, resp.content)
         self.assertEqual(resp.json()["stage"], "transit_permit")
         self.assertEqual(resp.json()["stage_label"], "Transit Permit")
 
-    def test_transitor_blocked_from_closing_and_cancelling(self):
+        resp = self._post_stage("MPDDFZE901", {"stage": "closure_guarantee"}, "pc_transitor")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()["stage"], "closure_guarantee")
+        self.assertEqual(resp.json()["stage_label"], "Closure Guarantee")
+
+    def test_transitor_blocked_from_done_and_cancelling(self):
         self.purchase.assigned_transitor = self.transitor
-        self.purchase.stage = "transit_permit"
+        self.purchase.stage = "closure_guarantee"
         self.purchase.save()
 
-        resp = self._post_stage("MPDDFZE901", {"stage": "closed"}, "pc_transitor")
+        resp = self._post_stage("MPDDFZE901", {"stage": "done"}, "pc_transitor")
         self.assertEqual(resp.status_code, 403)
-        self.assertIn("closed or cancelled", resp.json()["detail"])
+        self.assertIn("done or cancelled", resp.json()["detail"])
 
         resp = self._post_stage("MPDDFZE901", {"stage": "cancelled"}, "pc_transitor")
         self.assertEqual(resp.status_code, 403)
-        self.assertIn("closed or cancelled", resp.json()["detail"])
+        self.assertIn("done or cancelled", resp.json()["detail"])
 
     def test_transitor_blocked_from_skipping_steps(self):
         self.purchase.assigned_transitor = self.transitor
@@ -381,11 +437,18 @@ class PurchaseCheckpointTests(TestCase):
         self.assertIn("Invalid stage value", resp.json()["detail"])
 
     def test_sales_full_override_any_direction(self):
-        resp = self._post_stage("MPDDFZE901", {"stage": "closed"}, "pc_sales")
+        self._attach_ecd(self.purchase)
+
+        # Without an ECD file, any active stage is rejected.
+        resp = self._post_stage("MPDDFZE902", {"stage": "ecd_im8"}, "pc_sales")
+        self.assertEqual(resp.status_code, 400, resp.content)
+        self.assertIn("ECD / IM8 file is required", resp.json()["detail"])
+
+        resp = self._post_stage("MPDDFZE901", {"stage": "done"}, "pc_sales")
         self.assertEqual(resp.status_code, 200, resp.content)
         data = resp.json()
-        self.assertEqual(data["stage"], "closed")
-        self.assertEqual(data["stage_label"], "Closed")
+        self.assertEqual(data["stage"], "done")
+        self.assertEqual(data["stage_label"], "Done")
         self.assertEqual(data["stage_updated_by"], "pc_sales")
 
         resp = self._post_stage("MPDDFZE901", {"stage": None}, "pc_sales")
@@ -484,3 +547,95 @@ class PurchaseCheckpointTests(TestCase):
         )
         self.assertEqual(resp.status_code, 200, resp.content)
         self.assertEqual(len(resp.json()), 2)
+
+    def test_transit_permit_file_is_optional(self):
+        self.purchase.assigned_transitor = self.transitor
+        self.purchase.save()
+
+        resp = self._post_stage_multipart(
+            "MPDDFZE901", "ecd_im8", "pc_transitor", ecd=self._ecd_file()
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+        resp = self._post_stage_multipart(
+            "MPDDFZE901", "transit_permit", "pc_transitor"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertIsNone(resp.json()["transit_permit_file_name"])
+
+        # Sales may attach the permit document afterwards (same stage re-save).
+        resp = self._post_stage_multipart(
+            "MPDDFZE901", "transit_permit", "pc_sales", permit=self._permit_file()
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        data = resp.json()
+        self.assertEqual(data["transit_permit_file_name"], "permit.pdf")
+        self.assertIsNotNone(data["transit_permit_file_url"])
+        self.assertIsNotNone(data["ecd_file_name"])
+
+    def test_stage_files_download_endpoint(self):
+        resp = self._post_stage_multipart(
+            "MPDDFZE901", "ecd_im8", "pc_sales", ecd=self._ecd_file()
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+        # Unauthenticated requests are rejected.
+        resp = self.client.get("/api/inventory/purchases/MPDDFZE901/files/ecd")
+        self.assertEqual(resp.status_code, 401)
+
+        # Any authenticated user can view the document (mirrors purchase detail access).
+        resp = self.client.get(
+            "/api/inventory/purchases/MPDDFZE901/files/ecd",
+            **self._auth_headers("pc_purchasing"),
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertIn(b"%PDF-1.4 ecd", b"".join(resp.streaming_content))
+
+        # Missing file and unknown kinds are 404.
+        resp = self.client.get(
+            "/api/inventory/purchases/MPDDFZE901/files/transit_permit",
+            **self._auth_headers("pc_sales"),
+        )
+        self.assertEqual(resp.status_code, 404)
+
+        resp = self.client.get(
+            "/api/inventory/purchases/MPDDFZE901/files/bogus",
+            **self._auth_headers("pc_sales"),
+        )
+        self.assertEqual(resp.status_code, 404)
+
+    def test_replacing_ecd_file_updates_name(self):
+        resp = self._post_stage_multipart(
+            "MPDDFZE901", "ecd_im8", "pc_sales", ecd=self._ecd_file("first.pdf")
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()["ecd_file_name"], "first.pdf")
+
+        resp = self._post_stage_multipart(
+            "MPDDFZE901", "ecd_im8", "pc_sales", ecd=self._ecd_file("second.pdf")
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(resp.json()["ecd_file_name"], "second.pdf")
+
+        self.purchase.refresh_from_db()
+        self.assertTrue(self.purchase.ecd_file.name.endswith("second.pdf"))
+
+    def test_full_walk_through_to_done_via_sales(self):
+        self.purchase.assigned_transitor = self.transitor
+        self.purchase.save()
+
+        steps = ["ecd_im8", "transit_permit", "closure_guarantee"]
+        for step in steps:
+            resp = self._post_stage_multipart(
+                "MPDDFZE901", step, "pc_transitor",
+                ecd=self._ecd_file() if step == "ecd_im8" else None,
+            )
+            self.assertEqual(resp.status_code, 200, resp.content)
+            self.assertEqual(resp.json()["stage"], step)
+
+        resp = self._post_stage("MPDDFZE901", {"stage": "done"}, "pc_sales")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        data = resp.json()
+        self.assertEqual(data["stage"], "done")
+        self.assertEqual(data["stage_label"], "Done")
+        self.assertEqual(data["stage_updated_by"], "pc_sales")

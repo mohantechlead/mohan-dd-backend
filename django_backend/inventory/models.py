@@ -314,7 +314,8 @@ class Purchase(models.Model):
         choices=[
             ("ecd_im8", "ECD / IM8"),
             ("transit_permit", "Transit Permit"),
-            ("closed", "Closed"),
+            ("closure_guarantee", "Closure Guarantee"),
+            ("done", "Done"),
             ("cancelled", "Cancelled"),
         ],
     )
@@ -333,6 +334,20 @@ class Purchase(models.Model):
         on_delete=models.SET_NULL,
         related_name="assigned_purchases",
     )
+    ecd_file = models.FileField(
+        upload_to="purchases/ecd/",
+        null=True,
+        blank=True,
+        help_text="ECD / IM8 document (required to enter the ECD / IM8 checkpoint).",
+    )
+    ecd_file_original_name = models.CharField(max_length=255, blank=True, default="")
+    transit_permit_file = models.FileField(
+        upload_to="purchases/transit_permit/",
+        null=True,
+        blank=True,
+        help_text="Transit permit document (optional).",
+    )
+    transit_permit_file_original_name = models.CharField(max_length=255, blank=True, default="")
 
     def __str__(self):
         return f"{self.purchase_number} ({self.buyer})"
