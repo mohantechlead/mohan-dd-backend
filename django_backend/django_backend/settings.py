@@ -3,6 +3,7 @@ import datetime
 from pathlib import Path
 from datetime import timedelta
 import os
+import secrets
 
 try:
     import django_heroku
@@ -15,7 +16,24 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 # Core settings
 # ==============================
 
-SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "django-insecure-change-this-in-production")
+def _load_secret_key():
+    env_key = os.environ.get("DJANGO_SECRET_KEY")
+    if env_key:
+        return env_key
+    # Local fallback only: stable key in a gitignored file created on first run.
+    key_file = Path(__file__).resolve().with_name("secret_key.txt")
+    try:
+        stored = key_file.read_text().strip() if key_file.exists() else ""
+        if stored:
+            return stored
+        generated = secrets.token_urlsafe(48)
+        key_file.write_text(generated)
+        return generated
+    except OSError:
+        return secrets.token_urlsafe(48)
+
+
+SECRET_KEY = _load_secret_key()
 
 DEBUG = os.environ.get("DJANGO_DEBUG", "false").lower() == "true"
 
@@ -207,19 +225,25 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # Email
 # ==============================
 
-# Default to real SMTP delivery. Override via env when needed, e.g.
-# EMAIL_BACKEND=django.core.mail.backends.dummy.EmailBackend
-EMAIL_BACKEND = os.environ.get(
-    "EMAIL_BACKEND",
-    "django.core.mail.backends.smtp.EmailBackend",
-)
+# SMTP credentials must come from the environment (never from code).
+# Without them, log emails to console instead of sending.
 EMAIL_HOST = os.environ.get("EMAIL_HOST", "smtp.gmail.com")
-EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "tech@mohanplc.com")
-EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "llcbqsjcpgyzbqvc")
+EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
 EMAIL_PORT = int(os.environ.get("EMAIL_PORT", "587"))
 EMAIL_USE_TLS = True
 EMAIL_TIMEOUT = 30
-DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
+DEFAULT_FROM_EMAIL = EMAIL_HOST_USER or "webmaster@localhost"
+if EMAIL_HOST_USER and EMAIL_HOST_PASSWORD:
+    EMAIL_BACKEND = os.environ.get(
+        "EMAIL_BACKEND",
+        "django.core.mail.backends.smtp.EmailBackend",
+    )
+else:
+    EMAIL_BACKEND = os.environ.get(
+        "EMAIL_BACKEND",
+        "django.core.mail.backends.console.EmailBackend",
+    )
 
 # Shared recipients for inventory notifications (comma-separated emails).
 # Uses NOTIFICATION_EMAIL_RECIPIENTS first, then falls back to legacy
