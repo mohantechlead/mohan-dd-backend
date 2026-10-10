@@ -593,10 +593,6 @@ class PurchaseDetailSchema(Schema):
     assigned_transitor_id: Optional[int] = None
     assigned_transitor: Optional[str] = None
     stage_label: Optional[str] = None
-    ecd_file_url: Optional[str] = None
-    ecd_file_name: Optional[str] = None
-    transit_permit_file_url: Optional[str] = None
-    transit_permit_file_name: Optional[str] = None
     items: List[PurchaseItemSchema]
 
 
