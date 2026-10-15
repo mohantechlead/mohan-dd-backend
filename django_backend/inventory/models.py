@@ -374,6 +374,12 @@ class WarehouseStorageNote(models.Model):
     # Base price charged for the contracted storage period.
     # Set separately by accounting via the price endpoint, not at creation time.
     storage_price = models.DecimalField(max_digits=12, decimal_places=2, default=0)
+    # Currency for storage_price / expiration tiers / top-up prices.
+    currency = models.CharField(
+        max_length=10,
+        choices=[("ETB", "ETB"), ("USD", "USD"), ("EUR", "EUR"), ("GBP", "GBP")],
+        default="ETB",
+    )
     # Audit trail for price entry (set by accounting)
     price_entered_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -566,6 +572,53 @@ class WarehouseReleaseItem(models.Model):
 
     class Meta:
         ordering = ["release_note"]
+
+
+class WarehouseSettingsApproval(models.Model):
+    """Pending change requests for warehouse settings (storage price / expiration fee tiers).
+
+    Proposed via the price/tier endpoints; must be approved by accounting or admin
+    before the change is applied to the storage note.
+    """
+    id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True, primary_key=True)
+    storage_note = models.ForeignKey(
+        WarehouseStorageNote, on_delete=models.CASCADE, related_name="settings_approvals"
+    )
+    change_type = models.CharField(
+        max_length=20,
+        choices=[("price", "Storage Price"), ("tiers", "Expiration Fee Tiers")],
+    )
+    # price: {"storage_price": float, "currency": str, "remark": str|None}
+    # tiers: {"expiration_fee_tiers": [...], "currency": str|None}
+    payload = models.JSONField(default=dict)
+    status = models.CharField(
+        max_length=20,
+        choices=[("pending", "Pending"), ("approved", "Approved"), ("rejected", "Rejected")],
+        default="pending",
+    )
+    proposed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="warehouse_settings_proposals",
+    )
+    proposed_at = models.DateTimeField(auto_now_add=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="warehouse_settings_reviews",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_remark = models.TextField(blank=True, null=True)
+
+    def __str__(self):
+        return f"{self.change_type} for {self.storage_note.wsn_no} ({self.status})"
+
+    class Meta:
+        ordering = ["-proposed_at"]
 
 
 class WarehouseAuditLog(models.Model):

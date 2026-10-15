@@ -90,6 +90,7 @@ from .models import (
     WarehouseReleaseItem,
     WarehouseStorageEntry,
     WarehouseStorageEntryItem,
+    WarehouseSettingsApproval,
 )
 from .schemas import (
     GrnCreateSchema,
@@ -151,6 +152,8 @@ from .schemas import (
     WarehouseStorageEntryItemSchema,
     WarehouseStoragePriceSetSchema,
     ExpirationFeeTiersSetSchema,
+    WarehouseSettingsApprovalSchema,
+    WarehouseSettingsApprovalReviewSchema,
     WarehouseItemFlowSchema,
     WarehouseItemFlowEntrySchema,
     WarehouseItemFlowReleaseSchema,
@@ -315,6 +318,27 @@ def _is_admin(request) -> bool:
         return False
     role = getattr(user, "role", "logistics")
     return role == "admin" or getattr(user, "is_superuser", False)
+
+
+# Roles that operate the warehouse (entries, releases, top-ups).
+_WAREHOUSE_OPERATOR_ROLES = ("admin", "logistics", "store")
+# Roles that manage warehouse finance (prices, tiers, payments).
+_WAREHOUSE_FINANCE_ROLES = ("admin", "accounting")
+_VALID_CURRENCIES = ("USD", "EUR", "ETB", "GBP")
+
+
+def _require_roles(request, *roles):
+    """Return None if the caller's role is allowed, or a JsonResponse error (401/403)."""
+    user = getattr(request, "user", None)
+    if not user or not getattr(user, "is_authenticated", False):
+        return JsonResponse({"detail": "Authentication required."}, status=401)
+    role = getattr(user, "role", "logistics")
+    if role not in roles and not getattr(user, "is_superuser", False):
+        return JsonResponse(
+            {"detail": f"Access restricted. Allowed roles: {', '.join(roles)}."},
+            status=403,
+        )
+    return None
 
 
 def _normalize_partner_lookup_name(name: str) -> str:
@@ -3916,6 +3940,9 @@ def _storage_note_to_schema(note) -> dict:
     storage_price = Decimal(str(note.storage_price or 0))
     payment_remaining = max(storage_price - total_paid, Decimal("0"))
 
+    pending_price = note.settings_approvals.filter(change_type="price", status="pending").exists()
+    pending_tiers = note.settings_approvals.filter(change_type="tiers", status="pending").exists()
+
     return {
         "id": note.id,
         "wsn_no": note.wsn_no,
@@ -3926,6 +3953,7 @@ def _storage_note_to_schema(note) -> dict:
         "storage_period_value": note.storage_period_value,
         "storage_period_unit": note.storage_period_unit,
         "storage_price": float(note.storage_price),
+        "currency": note.currency or "ETB",
         "price_entered_by": note.price_entered_by.username if note.price_entered_by else None,
         "price_entered_at": note.price_entered_at.isoformat() if note.price_entered_at else None,
         "grace_period_value": note.grace_period_value,
@@ -3995,6 +4023,8 @@ def _storage_note_to_schema(note) -> dict:
         "total_entry_quantity": total_entry_qty,
         "total_paid": float(total_paid),
         "payment_remaining": float(payment_remaining),
+        "pending_price_approval": pending_price,
+        "pending_tiers_approval": pending_tiers,
     }
 
 
@@ -4050,7 +4080,7 @@ def _check_and_notify_warehouse_expiry(note) -> bool:
         f"  Storage Start:       {note.date.isoformat()}\n"
         f"  Expiry Date:         {expiry_str}\n"
         f"  Periods Expired:     {exp['periods_expired']}\n"
-        f"  Current Expiry Fee:  ${fee_text}\n\n"
+        f"  Current Expiry Fee:  {note.currency or 'ETB'} {fee_text}\n\n"
         f"STORED ITEMS\n"
         f"{items_plain_lines}\n\n"
         f"An expiration fee now applies. Please contact the customer to renew (top-up) "
@@ -4092,7 +4122,7 @@ def _check_and_notify_warehouse_expiry(note) -> bool:
         <tr><td style="padding:6px 0;color:#6b7280;">Storage Start</td><td style="padding:6px 0;color:#111827;">{_esc(note.date.isoformat())}</td></tr>
         <tr><td style="padding:6px 0;color:#6b7280;">Expiry Date</td><td style="padding:6px 0;color:#111827;">{_esc(expiry_str)}</td></tr>
         <tr><td style="padding:6px 0;color:#6b7280;">Periods Expired</td><td style="padding:6px 0;color:#111827;">{_esc(exp['periods_expired'])}</td></tr>
-        <tr><td style="padding:6px 0;color:#6b7280;">Current Expiry Fee</td><td style="padding:6px 0;color:#111827;font-weight:600;">${_esc(fee_text)}</td></tr>
+        <tr><td style="padding:6px 0;color:#6b7280;">Current Expiry Fee</td><td style="padding:6px 0;color:#111827;font-weight:600;">{_esc(note.currency or 'ETB')} {_esc(fee_text)}</td></tr>
       </table>
       <h3 style="margin:0 0 12px;font-size:14px;color:#b45309;">Stored Items ({len(_warehouse_storage_basic_items(note))})</h3>
       <table style="width:100%;border-collapse:collapse;font-size:13px;border:1px solid #e5e7eb;border-radius:6px;background:#fff;">
@@ -4173,14 +4203,18 @@ def _check_and_notify_all_warehouse_expiry() -> int:
     return sent_count
 
 
-@router.post("/warehouse-storage-notes", response=WarehouseStorageNoteDetailSchema)
+@router.post("/warehouse-storage-notes", response=WarehouseStorageNoteDetailSchema, auth=JWTAuth())
 def create_warehouse_storage_note(request, payload: WarehouseStorageNoteCreatePayloadSchema):
+    err = _require_roles(request, "admin", "logistics")
+    if err:
+        return err
     wsn_no = (payload.wsn_no or "").strip() or _next_wsn_number()
     if WarehouseStorageNote.objects.filter(wsn_no=wsn_no).exists():
         return JsonResponse(
             {"detail": f"Warehouse storage note '{wsn_no}' already exists."},
             status=400,
         )
+    # Price is never set at creation; accounting proposes it via the price endpoint.
     note = WarehouseStorageNote.objects.create(
         wsn_no=wsn_no,
         customer_name=payload.customer_name,
@@ -4189,7 +4223,7 @@ def create_warehouse_storage_note(request, payload: WarehouseStorageNoteCreatePa
         remark=payload.remark,
         storage_period_value=payload.storage_period_value,
         storage_period_unit=payload.storage_period_unit,
-        storage_price=payload.storage_price,
+        storage_price=0,
         grace_period_value=payload.grace_period_value,
         grace_period_unit=payload.grace_period_unit,
     )
@@ -4216,7 +4250,8 @@ def create_warehouse_storage_note(request, payload: WarehouseStorageNoteCreatePa
             unit_measurement=item.unit_measurement,
             internal_code=item.internal_code,
             bags=item.bags,
-            remaining_quantity=item.quantity,
+            # Stock starts empty: goods only count as stored once an entry is recorded.
+            remaining_quantity=0,
         )
     note.refresh_from_db()
     _log_warehouse_action(
@@ -4230,26 +4265,27 @@ def create_warehouse_storage_note(request, payload: WarehouseStorageNoteCreatePa
     return _storage_note_to_schema(note)
 
 
-@router.get("/warehouse-storage-notes/next-number")
+@router.get("/warehouse-storage-notes/next-number", auth=JWTAuth())
 def next_warehouse_storage_note_number(request):
     """Suggest the next auto-generated Warehouse Storage Note number (WSN-###)."""
     return {"next_number": _next_wsn_number()}
 
 
-@router.get("/warehouse-storage-notes", response=list[WarehouseStorageNoteDetailSchema])
+@router.get("/warehouse-storage-notes", response=list[WarehouseStorageNoteDetailSchema], auth=JWTAuth())
 def list_warehouse_storage_notes(request):
     notes = WarehouseStorageNote.objects.prefetch_related(
         "items", "expiration_fee_tiers", "top_ups",
         "entries__items__storage_item",
+        "settings_approvals",
     ).all()
     return [_storage_note_to_schema(n) for n in notes]
 
 
-@router.get("/warehouse-storage-notes/{note_id}", response=WarehouseStorageNoteDetailSchema)
+@router.get("/warehouse-storage-notes/{note_id}", response=WarehouseStorageNoteDetailSchema, auth=JWTAuth())
 def get_warehouse_storage_note(request, note_id: uuid.UUID):
     note = get_object_or_404(
         WarehouseStorageNote.objects.prefetch_related(
-            "items", "expiration_fee_tiers", "top_ups"
+            "items", "expiration_fee_tiers", "top_ups", "settings_approvals"
         ),
         id=note_id,
     )
@@ -4260,6 +4296,9 @@ def get_warehouse_storage_note(request, note_id: uuid.UUID):
 def update_warehouse_storage_note(
     request, note_id: uuid.UUID, payload: WarehouseStorageNoteUpdateSchema
 ):
+    err = _require_admin(request)
+    if err:
+        return err
     note = get_object_or_404(WarehouseStorageNote, id=note_id)
     if payload.storage_period_unit not in (None, *_PERIOD_UNITS):
         return JsonResponse({"detail": "Invalid period unit."}, status=400)
@@ -4271,7 +4310,6 @@ def update_warehouse_storage_note(
         "remark",
         "storage_period_value",
         "storage_period_unit",
-        "storage_price",
         "grace_period_value",
         "grace_period_unit",
     ):
@@ -4285,6 +4323,9 @@ def update_warehouse_storage_note(
 
 @router.delete("/warehouse-storage-notes/{note_id}", auth=JWTAuth())
 def delete_warehouse_storage_note(request, note_id: uuid.UUID):
+    err = _require_admin(request)
+    if err:
+        return err
     note = get_object_or_404(WarehouseStorageNote, id=note_id)
     note.delete()
     return {"detail": "Warehouse storage note deleted successfully."}
@@ -4296,6 +4337,9 @@ def delete_warehouse_storage_note(request, note_id: uuid.UUID):
     auth=JWTAuth(),
 )
 def warehouse_storage_top_up(request, note_id: uuid.UUID, payload: WarehouseStorageTopUpCreateSchema):
+    err = _require_roles(request, *_WAREHOUSE_OPERATOR_ROLES)
+    if err:
+        return err
     note = get_object_or_404(
         WarehouseStorageNote.objects.prefetch_related(
             "items", "expiration_fee_tiers", "top_ups"
@@ -4304,12 +4348,17 @@ def warehouse_storage_top_up(request, note_id: uuid.UUID, payload: WarehouseStor
     )
     if payload.additional_period_unit not in _PERIOD_UNITS:
         return JsonResponse({"detail": "Invalid period unit."}, status=400)
+    # Price on a top-up may only be set by accounting/admin.
+    if _is_admin(request) or getattr(request.user, "role", "") in _WAREHOUSE_FINANCE_ROLES:
+        price = payload.price
+    else:
+        price = 0
     WarehouseStorageTopUp.objects.create(
         storage_note=note,
         top_up_date=payload.top_up_date,
         additional_period_value=payload.additional_period_value,
         additional_period_unit=payload.additional_period_unit,
-        price=payload.price,
+        price=price,
         remark=payload.remark,
     )
     # Extend storage period
@@ -4327,6 +4376,9 @@ def warehouse_storage_top_up(request, note_id: uuid.UUID, payload: WarehouseStor
 
 @router.post("/warehouse-release-notes", response=WarehouseReleaseNoteDetailSchema, auth=JWTAuth())
 def create_warehouse_release_note(request, payload: WarehouseReleaseNoteCreateSchema):
+    err = _require_roles(request, *_WAREHOUSE_OPERATOR_ROLES)
+    if err:
+        return err
     storage_note = get_object_or_404(
         WarehouseStorageNote.objects.prefetch_related("items"),
         id=payload.storage_note_id,
@@ -4385,7 +4437,7 @@ def create_warehouse_release_note(request, payload: WarehouseReleaseNoteCreateSc
             item_name=item.item_name,
             code=item.code,
             quantity=item.quantity,
-            unit_measurement=item.unit_measurement,
+            unit_measurement=item.unit_measurement or "",
             internal_code=item.internal_code,
             bags=item.bags,
         )
@@ -4430,19 +4482,19 @@ def _release_note_to_schema(note) -> dict:
     }
 
 
-@router.get("/warehouse-release-notes/next-number")
+@router.get("/warehouse-release-notes/next-number", auth=JWTAuth())
 def next_warehouse_release_note_number(request):
     """Suggest the next auto-generated Warehouse Release Note number (WRN-###)."""
     return {"next_number": _next_wrn_number()}
 
 
-@router.get("/warehouse-release-notes", response=list[WarehouseReleaseNoteDetailSchema])
+@router.get("/warehouse-release-notes", response=list[WarehouseReleaseNoteDetailSchema], auth=JWTAuth())
 def list_warehouse_release_notes(request):
     notes = WarehouseReleaseNote.objects.prefetch_related("items", "storage_note").all()
     return [_release_note_to_schema(n) for n in notes]
 
 
-@router.get("/warehouse-release-notes/{note_id}", response=WarehouseReleaseNoteDetailSchema)
+@router.get("/warehouse-release-notes/{note_id}", response=WarehouseReleaseNoteDetailSchema, auth=JWTAuth())
 def get_warehouse_release_note(request, note_id: uuid.UUID):
     note = get_object_or_404(
         WarehouseReleaseNote.objects.prefetch_related("items", "storage_note"), id=note_id
@@ -4461,6 +4513,9 @@ def get_warehouse_release_note(request, note_id: uuid.UUID):
 )
 def create_warehouse_storage_entry(request, note_id: uuid.UUID, payload: WarehouseStorageEntryCreateSchema):
     """Create a delivery entry for a storage note. Increments remaining_quantity on each item."""
+    err = _require_roles(request, *_WAREHOUSE_OPERATOR_ROLES)
+    if err:
+        return err
     note = get_object_or_404(
         WarehouseStorageNote.objects.prefetch_related("items"),
         id=note_id,
@@ -4528,6 +4583,7 @@ def create_warehouse_storage_entry(request, note_id: uuid.UUID, payload: Warehou
 @router.get(
     "/warehouse-storage-notes/{note_id}/entries",
     response=list[WarehouseStorageEntrySchema],
+    auth=JWTAuth(),
 )
 def list_warehouse_storage_entries(request, note_id: uuid.UUID):
     """List all delivery entries for a storage note."""
@@ -4539,6 +4595,7 @@ def list_warehouse_storage_entries(request, note_id: uuid.UUID):
 @router.get(
     "/warehouse-storage-notes/{note_id}/entries/{entry_id}",
     response=WarehouseStorageEntrySchema,
+    auth=JWTAuth(),
 )
 def get_warehouse_storage_entry(request, note_id: uuid.UUID, entry_id: uuid.UUID):
     """Get a single delivery entry."""
@@ -4556,6 +4613,9 @@ def get_warehouse_storage_entry(request, note_id: uuid.UUID, entry_id: uuid.UUID
 )
 def delete_warehouse_storage_entry(request, note_id: uuid.UUID, entry_id: uuid.UUID):
     """Delete a delivery entry. Decrements remaining_quantity on each item."""
+    err = _require_admin(request)
+    if err:
+        return err
     entry = get_object_or_404(
         WarehouseStorageEntry,
         id=entry_id,
@@ -4593,8 +4653,34 @@ def _entry_to_schema(entry) -> dict:
 
 
 # ============================================================
-# Warehouse Storage Price (set by accounting)
+# Warehouse Storage Price / Tiers (proposed, then approved)
 # ============================================================
+
+def _settings_approval_to_schema(a) -> dict:
+    return {
+        "id": a.id,
+        "storage_note_id": a.storage_note_id,
+        "wsn_no": a.storage_note.wsn_no,
+        "customer_name": a.storage_note.customer_name,
+        "change_type": a.change_type,
+        "payload": a.payload or {},
+        "status": a.status,
+        "proposed_by": a.proposed_by.username if a.proposed_by else None,
+        "proposed_at": a.proposed_at.isoformat() if a.proposed_at else None,
+        "reviewed_by": a.reviewed_by.username if a.reviewed_by else None,
+        "reviewed_at": a.reviewed_at.isoformat() if a.reviewed_at else None,
+        "review_remark": a.review_remark,
+    }
+
+
+def _normalize_currency(currency, note):
+    c = (currency or "").strip().upper()
+    if not c:
+        return note.currency or "ETB"
+    if c not in _VALID_CURRENCIES:
+        return None
+    return c
+
 
 @router.put(
     "/warehouse-storage-notes/{note_id}/price",
@@ -4602,25 +4688,40 @@ def _entry_to_schema(entry) -> dict:
     auth=JWTAuth(),
 )
 def set_warehouse_storage_price(request, note_id: uuid.UUID, payload: WarehouseStoragePriceSetSchema):
-    """Set or update the storage price for a WSN (used by accounting)."""
+    """Propose a storage price change for a WSN. Requires accounting/admin approval."""
+    err = _require_roles(request, *_WAREHOUSE_FINANCE_ROLES)
+    if err:
+        return err
     note = get_object_or_404(
         WarehouseStorageNote.objects.prefetch_related(
-            "items", "expiration_fee_tiers", "top_ups", "entries"
+            "items", "expiration_fee_tiers", "top_ups", "entries", "settings_approvals"
         ),
         id=note_id,
     )
-    note.storage_price = payload.storage_price
-    note.price_entered_by = request.user
-    note.price_entered_at = timezone.now()
-    note.save()
-    note.refresh_from_db()
+    currency = _normalize_currency(payload.currency, note)
+    if currency is None:
+        return JsonResponse(
+            {"detail": f"Invalid currency. Allowed: {', '.join(_VALID_CURRENCIES)}."},
+            status=400,
+        )
+    note.settings_approvals.filter(change_type="price", status="pending").update(status="rejected")
+    approval = WarehouseSettingsApproval.objects.create(
+        storage_note=note,
+        change_type="price",
+        payload={
+            "storage_price": float(payload.storage_price),
+            "currency": currency,
+            "remark": (payload.remark or "").strip() or None,
+        },
+        proposed_by=getattr(request, "user", None),
+    )
     _log_warehouse_action(
         request.user,
-        "price_set",
+        "price_proposed",
         "price",
-        note.id,
+        approval.id,
         storage_note=note,
-        details={"storage_price": float(payload.storage_price)},
+        details={"storage_price": float(payload.storage_price), "currency": currency},
     )
     return _storage_note_to_schema(note)
 
@@ -4630,32 +4731,162 @@ def set_warehouse_storage_price(request, note_id: uuid.UUID, payload: WarehouseS
     auth=JWTAuth(),
 )
 def set_expiration_fee_tiers(request, note_id: uuid.UUID, payload: ExpirationFeeTiersSetSchema):
-    """Set or replace the expiration fee tiers for a WSN (used by accounting)."""
+    """Propose replacement expiration fee tiers for a WSN. Requires accounting/admin approval."""
+    err = _require_roles(request, *_WAREHOUSE_FINANCE_ROLES)
+    if err:
+        return err
     note = get_object_or_404(
         WarehouseStorageNote.objects.prefetch_related(
-            "items", "expiration_fee_tiers", "top_ups", "entries"
+            "items", "expiration_fee_tiers", "top_ups", "entries", "settings_approvals"
         ),
         id=note_id,
     )
-    note.expiration_fee_tiers.all().delete()
-    for tier in payload.expiration_fee_tiers or []:
-        ExpirationFeeTier.objects.create(
-            storage_note=note,
-            tier_index=tier.tier_index,
-            period_value=tier.period_value,
-            period_unit=tier.period_unit,
-            fee_amount=tier.fee_amount,
+    currency = _normalize_currency(payload.currency, note)
+    if currency is None:
+        return JsonResponse(
+            {"detail": f"Invalid currency. Allowed: {', '.join(_VALID_CURRENCIES)}."},
+            status=400,
         )
-    note.refresh_from_db()
+    tiers = [
+        {
+            "tier_index": t.tier_index,
+            "period_value": t.period_value,
+            "period_unit": t.period_unit,
+            "fee_amount": float(t.fee_amount),
+        }
+        for t in payload.expiration_fee_tiers or []
+    ]
+    note.settings_approvals.filter(change_type="tiers", status="pending").update(status="rejected")
+    approval = WarehouseSettingsApproval.objects.create(
+        storage_note=note,
+        change_type="tiers",
+        payload={"expiration_fee_tiers": tiers, "currency": currency},
+        proposed_by=getattr(request, "user", None),
+    )
     _log_warehouse_action(
         request.user,
-        "tiers_set",
+        "tiers_proposed",
         "tiers",
-        note.id,
+        approval.id,
         storage_note=note,
-        details={"tier_count": len(payload.expiration_fee_tiers or [])},
+        details={"tier_count": len(tiers), "currency": currency},
     )
     return _storage_note_to_schema(note)
+
+
+@router.get(
+    "/warehouse-settings-approvals",
+    response=list[WarehouseSettingsApprovalSchema],
+    auth=JWTAuth(),
+)
+def list_warehouse_settings_approvals(request, status: str = "pending"):
+    """List warehouse settings approval requests (price / tiers)."""
+    err = _require_roles(request, *_WAREHOUSE_FINANCE_ROLES)
+    if err:
+        return err
+    qs = WarehouseSettingsApproval.objects.select_related(
+        "storage_note", "proposed_by", "reviewed_by"
+    ).all()
+    if status and status != "all":
+        qs = qs.filter(status=status)
+    return [_settings_approval_to_schema(a) for a in qs]
+
+
+@router.post(
+    "/warehouse-settings-approvals/{approval_id}/approve",
+    response=WarehouseSettingsApprovalSchema,
+    auth=JWTAuth(),
+)
+def approve_warehouse_settings_approval(request, approval_id: uuid.UUID):
+    """Approve a pending price/tiers change and apply it to the storage note."""
+    err = _require_roles(request, *_WAREHOUSE_FINANCE_ROLES)
+    if err:
+        return err
+    approval = get_object_or_404(
+        WarehouseSettingsApproval.objects.select_related("storage_note", "proposed_by"),
+        id=approval_id,
+    )
+    if approval.status != "pending":
+        return JsonResponse({"detail": "This request has already been reviewed."}, status=400)
+    note = approval.storage_note
+    data = approval.payload or {}
+    if approval.change_type == "price":
+        note.storage_price = Decimal(str(data.get("storage_price") or 0))
+        if data.get("currency"):
+            note.currency = data["currency"]
+        note.price_entered_by = request.user
+        note.price_entered_at = timezone.now()
+        note.save()
+        _log_warehouse_action(
+            request.user,
+            "price_set",
+            "price",
+            note.id,
+            storage_note=note,
+            details={"storage_price": float(note.storage_price), "currency": note.currency},
+        )
+    elif approval.change_type == "tiers":
+        if data.get("currency"):
+            note.currency = data["currency"]
+            note.save()
+        note.expiration_fee_tiers.all().delete()
+        for t in data.get("expiration_fee_tiers") or []:
+            ExpirationFeeTier.objects.create(
+                storage_note=note,
+                tier_index=t.get("tier_index"),
+                period_value=t.get("period_value") or 1,
+                period_unit=t.get("period_unit") or "months",
+                fee_amount=t.get("fee_amount") or 0,
+            )
+        _log_warehouse_action(
+            request.user,
+            "tiers_set",
+            "tiers",
+            note.id,
+            storage_note=note,
+            details={"tier_count": len(data.get("expiration_fee_tiers") or [])},
+        )
+    else:
+        return JsonResponse({"detail": "Unknown change type."}, status=400)
+    approval.status = "approved"
+    approval.reviewed_by = request.user
+    approval.reviewed_at = timezone.now()
+    approval.save()
+    return _settings_approval_to_schema(approval)
+
+
+@router.post(
+    "/warehouse-settings-approvals/{approval_id}/reject",
+    response=WarehouseSettingsApprovalSchema,
+    auth=JWTAuth(),
+)
+def reject_warehouse_settings_approval(
+    request, approval_id: uuid.UUID, payload: WarehouseSettingsApprovalReviewSchema
+):
+    """Reject a pending price/tiers change request."""
+    err = _require_roles(request, *_WAREHOUSE_FINANCE_ROLES)
+    if err:
+        return err
+    approval = get_object_or_404(
+        WarehouseSettingsApproval.objects.select_related("storage_note", "proposed_by"),
+        id=approval_id,
+    )
+    if approval.status != "pending":
+        return JsonResponse({"detail": "This request has already been reviewed."}, status=400)
+    approval.status = "rejected"
+    approval.reviewed_by = request.user
+    approval.reviewed_at = timezone.now()
+    approval.review_remark = (payload.remark or "").strip() or None
+    approval.save()
+    _log_warehouse_action(
+        request.user,
+        f"{approval.change_type}_rejected",
+        approval.change_type,
+        approval.id,
+        storage_note=approval.storage_note,
+        details={"remark": approval.review_remark},
+    )
+    return _settings_approval_to_schema(approval)
 
 
 # ============================================================
@@ -4665,6 +4896,7 @@ def set_expiration_fee_tiers(request, note_id: uuid.UUID, payload: ExpirationFee
 @router.get(
     "/warehouse-storage-notes/{note_id}/flow",
     response=WarehouseItemFlowSchema,
+    auth=JWTAuth(),
 )
 def get_warehouse_item_flow(request, note_id: uuid.UUID):
     """Get the complete flow of items for a storage note: entries, releases, payments."""
@@ -4743,6 +4975,7 @@ def get_warehouse_item_flow(request, note_id: uuid.UUID):
         customer_name=note.customer_name,
         contract_date=note.date,
         storage_price=float(note.storage_price),
+        currency=note.currency or "ETB",
         total_agreed_quantity=total_agreed,
         total_entry_quantity=total_entry_qty,
         total_released_quantity=total_released,
@@ -4762,6 +4995,7 @@ def get_warehouse_item_flow(request, note_id: uuid.UUID):
 @router.get(
     "/warehouse-item-inventory",
     response=list[WarehouseItemInventorySchema],
+    auth=JWTAuth(),
 )
 def get_warehouse_item_inventory(request, item_name: str = None, code: str = None, group_by_name: str = None):
     """Get inventory summary for items across all storage notes.
@@ -4819,21 +5053,26 @@ def get_warehouse_item_inventory(request, item_name: str = None, code: str = Non
 
             item_map[key]["total_stored"] += entered
             item_map[key]["total_released"] += released
-            item_map[key]["remaining"] += si.remaining_quantity or 0
+            # Remaining in storage = physically entered - physically released.
+            item_map[key]["remaining"] += max(entered - released, 0)
 
             # Track per-WSN breakdown
             if note.wsn_no not in item_map[key]["storage_notes"]:
                 item_map[key]["storage_notes"][note.wsn_no] = {
+                    "id": note.id,
                     "wsn_no": note.wsn_no,
                     "customer_name": note.customer_name,
                     "contract_date": note.date,
                     "total_quantity": si.quantity,
                     "entered_quantity": 0,
                     "released_quantity": 0,
-                    "remaining_quantity": si.remaining_quantity or 0,
+                    "remaining_quantity": 0,
                 }
             item_map[key]["storage_notes"][note.wsn_no]["entered_quantity"] += entered
             item_map[key]["storage_notes"][note.wsn_no]["released_quantity"] += released
+            item_map[key]["storage_notes"][note.wsn_no]["remaining_quantity"] += max(
+                entered - released, 0
+            )
 
     result = []
     for key, data in item_map.items():
@@ -4864,7 +5103,7 @@ def warehouse_expiry_check(request):
 # Warehouse Dashboard Summary
 # ============================================================
 
-@router.get("/warehouse-dashboard", response=WarehouseDashboardSchema)
+@router.get("/warehouse-dashboard", response=WarehouseDashboardSchema, auth=JWTAuth())
 def get_warehouse_dashboard(request):
     """Summary statistics for the warehouse dashboard."""
     from accounting.models import WarehouseStoragePayment
@@ -4916,7 +5155,7 @@ def get_warehouse_dashboard(request):
             )
             total_items_stored += Decimal(str(entered))
             total_items_released += Decimal(str(released))
-            total_items_remaining += Decimal(str(si.remaining_quantity or 0))
+            total_items_remaining += Decimal(str(max(entered - released, 0)))
 
         # Check if expiring soon
         if note.status == "active":
@@ -4961,7 +5200,7 @@ def get_warehouse_dashboard(request):
 # Audit Trail
 # ============================================================
 
-@router.get("/warehouse-audit-logs")
+@router.get("/warehouse-audit-logs", auth=JWTAuth())
 def get_warehouse_audit_logs(request, storage_note_id: str = None, limit: int = 50):
     """Get audit logs for warehouse operations."""
     from inventory.models import WarehouseAuditLog

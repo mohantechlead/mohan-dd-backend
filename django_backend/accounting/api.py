@@ -42,6 +42,23 @@ from .schemas import (
 
 router = Router()
 
+# Warehouse storage payments are finance data: only accounting/admin may access.
+_WAREHOUSE_FINANCE_ROLES = ("admin", "accounting")
+
+
+def _require_finance_roles(request):
+    """Return None if the caller is accounting/admin, or a JsonResponse error (401/403)."""
+    user = getattr(request, "user", None)
+    if not user or not getattr(user, "is_authenticated", False):
+        return JsonResponse({"detail": "Authentication required."}, status=401)
+    role = getattr(user, "role", "logistics")
+    if role not in _WAREHOUSE_FINANCE_ROLES and not getattr(user, "is_superuser", False):
+        return JsonResponse(
+            {"detail": "Access restricted to accounting and admin roles."},
+            status=403,
+        )
+    return None
+
 
 def _vendor_payment_grand_total(vp: VendorPayment) -> Decimal:
     return (
@@ -678,6 +695,7 @@ def _storage_payment_to_schema(sp: WarehouseStoragePayment) -> WarehouseStorageP
         customer_name=sp.customer_name,
         payment_type=sp.payment_type,
         amount=float(sp.amount),
+        currency=getattr(sp.storage_note, "currency", None) or "ETB",
         status=sp.status,
         approved_by=sp.approved_by.username if sp.approved_by else None,
         approval_date=sp.approval_date.isoformat() if sp.approval_date else None,
@@ -698,6 +716,9 @@ def _storage_payment_to_schema(sp: WarehouseStoragePayment) -> WarehouseStorageP
 @router.get("/warehouse-storage-payments/plan", auth=JWTAuth())
 def get_payment_plan(request, wsn_no: str, installments: int = 3):
     """Generate a suggested payment installment plan for a WSN."""
+    err = _require_finance_roles(request)
+    if err:
+        return err
     note = get_object_or_404(WarehouseStorageNote, wsn_no__iexact=wsn_no.strip())
     storage_price, already_paid, remaining, _ = _storage_payment_totals(note.wsn_no)
 
@@ -726,6 +747,9 @@ def get_payment_plan(request, wsn_no: str, installments: int = 3):
 
 @router.post("/warehouse-storage-payments", response=WarehouseStoragePaymentDetailSchema, auth=JWTAuth())
 def create_warehouse_storage_payment(request, payload: WarehouseStoragePaymentCreateSchema):
+    err = _require_finance_roles(request)
+    if err:
+        return err
     note = get_object_or_404(
         WarehouseStorageNote,
         wsn_no__iexact=payload.wsn_no.strip(),
@@ -788,31 +812,46 @@ def create_warehouse_storage_payment(request, payload: WarehouseStoragePaymentCr
         payment_type=payment_type,
         amount=amount,
         remark=(payload.remark or "").strip() or None,
-        status="pending",
+        # Recorded directly by accounting/admin — no separate approval step needed.
+        status="approved",
+        approved_by=getattr(request, "user", None),
+        approval_date=timezone.now(),
     )
     return _storage_payment_to_schema(sp)
 
 
 @router.get("/warehouse-storage-payments", response=List[WarehouseStoragePaymentDetailSchema], auth=JWTAuth())
 def list_warehouse_storage_payments(request):
+    err = _require_finance_roles(request)
+    if err:
+        return err
     rows = WarehouseStoragePayment.objects.select_related("storage_note").all().order_by("-payment_number")
     return [_storage_payment_to_schema(sp) for sp in rows]
 
 
 @router.get("/warehouse-storage-payments/next-number", auth=JWTAuth())
 def warehouse_storage_payment_next_number(request):
+    err = _require_finance_roles(request)
+    if err:
+        return err
     values = WarehouseStoragePayment.objects.values_list("payment_number", flat=True)
     return {"next_number": next_warehouse_storage_payment_number(values)}
 
 
 @router.get("/warehouse-storage-payments/{payment_number}", response=WarehouseStoragePaymentDetailSchema, auth=JWTAuth())
 def get_warehouse_storage_payment(request, payment_number: str):
+    err = _require_finance_roles(request)
+    if err:
+        return err
     sp = get_object_or_404(WarehouseStoragePayment, payment_number__iexact=payment_number.strip())
     return _storage_payment_to_schema(sp)
 
 
 @router.put("/warehouse-storage-payments/{payment_number}", response=WarehouseStoragePaymentDetailSchema, auth=JWTAuth())
 def update_warehouse_storage_payment(request, payment_number: str, payload: WarehouseStoragePaymentUpdateSchema):
+    err = _require_finance_roles(request)
+    if err:
+        return err
     sp = get_object_or_404(WarehouseStoragePayment, payment_number__iexact=payment_number.strip())
     _, _, remaining_without_me, _ = _storage_payment_totals(sp.storage_note_id, exclude_id=sp.id)
 
@@ -846,6 +885,9 @@ def update_warehouse_storage_payment(request, payment_number: str, payload: Ware
 
 @router.delete("/warehouse-storage-payments/{payment_number}", auth=JWTAuth())
 def delete_warehouse_storage_payment(request, payment_number: str):
+    err = _require_finance_roles(request)
+    if err:
+        return err
     sp = get_object_or_404(WarehouseStoragePayment, payment_number__iexact=payment_number.strip())
     sp.delete()
     return {"detail": "Warehouse storage payment deleted successfully."}
@@ -853,6 +895,9 @@ def delete_warehouse_storage_payment(request, payment_number: str):
 
 @router.post("/warehouse-storage-payments/{payment_number}/approve", response=WarehouseStoragePaymentDetailSchema, auth=JWTAuth())
 def approve_warehouse_storage_payment(request, payment_number: str, payload: WarehouseStoragePaymentApproveSchema):
+    err = _require_finance_roles(request)
+    if err:
+        return err
     sp = get_object_or_404(WarehouseStoragePayment, payment_number__iexact=payment_number.strip())
     sp.status = "approved"
     sp.approved_by_id = payload.approved_by_id
@@ -863,6 +908,9 @@ def approve_warehouse_storage_payment(request, payment_number: str, payload: War
 
 @router.post("/warehouse-storage-payments/{payment_number}/update-status", response=WarehouseStoragePaymentDetailSchema, auth=JWTAuth())
 def update_warehouse_storage_payment_status(request, payment_number: str, payload: WarehouseStoragePaymentStatusUpdateSchema):
+    err = _require_finance_roles(request)
+    if err:
+        return err
     sp = get_object_or_404(WarehouseStoragePayment, payment_number__iexact=payment_number.strip())
     if sp.status != "approved":
         return JsonResponse(

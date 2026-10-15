@@ -203,6 +203,7 @@ class WarehouseStoragePaymentDetailSchema(Schema):
     customer_name: str
     payment_type: str
     amount: float
+    currency: str = "ETB"
     status: str
     approved_by: Optional[str] = None
     approval_date: Optional[str] = None

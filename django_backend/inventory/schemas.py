@@ -873,6 +873,7 @@ class WarehouseStorageNoteDetailSchema(Schema):
     storage_period_value: int
     storage_period_unit: str
     storage_price: float
+    currency: str = "ETB"
     price_entered_by: Optional[str] = None
     price_entered_at: Optional[str] = None
     grace_period_value: int
@@ -891,6 +892,8 @@ class WarehouseStorageNoteDetailSchema(Schema):
     total_entry_quantity: float = 0
     total_paid: float = 0
     payment_remaining: float = 0
+    pending_price_approval: bool = False
+    pending_tiers_approval: bool = False
 
 
 class WarehouseStorageNoteUpdateSchema(Schema):
@@ -899,7 +902,6 @@ class WarehouseStorageNoteUpdateSchema(Schema):
     remark: Optional[str] = None
     storage_period_value: Optional[int] = None
     storage_period_unit: Optional[str] = None
-    storage_price: Optional[float] = None
     grace_period_value: Optional[int] = None
     grace_period_unit: Optional[str] = None
 
@@ -910,7 +912,7 @@ class WarehouseReleaseItemCreateSchema(Schema):
     code: Optional[str] = None
     item_name: str
     quantity: float
-    unit_measurement: str
+    unit_measurement: Optional[str] = None
     bags: Optional[float] = None
     internal_code: Optional[str] = None
 
@@ -951,11 +953,32 @@ class WarehouseReleaseNoteDetailSchema(Schema):
 
 class WarehouseStoragePriceSetSchema(Schema):
     storage_price: float
+    currency: Optional[str] = None
     remark: Optional[str] = None
 
 
 class ExpirationFeeTiersSetSchema(Schema):
     expiration_fee_tiers: List[ExpirationFeeTierCreateSchema]
+    currency: Optional[str] = None
+
+
+class WarehouseSettingsApprovalSchema(Schema):
+    id: uuid.UUID
+    storage_note_id: uuid.UUID
+    wsn_no: str
+    customer_name: str
+    change_type: str
+    payload: dict
+    status: str
+    proposed_by: Optional[str] = None
+    proposed_at: Optional[str] = None
+    reviewed_by: Optional[str] = None
+    reviewed_at: Optional[str] = None
+    review_remark: Optional[str] = None
+
+
+class WarehouseSettingsApprovalReviewSchema(Schema):
+    remark: Optional[str] = None
 
 
 # ============================================================
@@ -993,6 +1016,7 @@ class WarehouseItemFlowSchema(Schema):
     customer_name: str
     contract_date: date
     storage_price: float
+    currency: str = "ETB"
     total_agreed_quantity: float
     total_entry_quantity: float
     total_released_quantity: float
@@ -1005,6 +1029,7 @@ class WarehouseItemFlowSchema(Schema):
 
 
 class WarehouseItemInventoryNoteSchema(Schema):
+    id: Optional[uuid.UUID] = None
     wsn_no: str
     customer_name: str
     contract_date: date

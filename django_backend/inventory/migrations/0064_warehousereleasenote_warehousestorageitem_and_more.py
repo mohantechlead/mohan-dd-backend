@@ -9,6 +9,7 @@ class Migration(migrations.Migration):
 
     dependencies = [
         ('inventory', '0063_alter_shippinginvoiceitem_price_and_more'),
+        ('inventory', '0063_shippinginvoice_destination_contact_name_and_more'),
     ]
 
     operations = [

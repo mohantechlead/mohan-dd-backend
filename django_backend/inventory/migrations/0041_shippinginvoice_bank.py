@@ -4,6 +4,7 @@ from django.db import migrations, models
 class Migration(migrations.Migration):
 
     dependencies = [
+        ("inventory", "0039_alter_purchaseitem_before_vat"),
     ]
 
     operations = [

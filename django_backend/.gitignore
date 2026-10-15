@@ -7,3 +7,6 @@ env
 .env
 entrypoint.sh
 django_backend/settings.py
+secret_key.txt
+media/
+*.log
