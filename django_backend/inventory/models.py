@@ -217,6 +217,7 @@ class ShippingInvoice(models.Model):
     bill_of_lading_remark = models.TextField(blank=True, null=True)
     bank = models.TextField(blank=True, null=True)
     sr_no = models.PositiveIntegerField(blank=True, null=True)
+    destination = models.CharField(max_length=255, blank=True, null=True)
     destination_contact_name = models.CharField(max_length=255, blank=True, null=True)
     destination_contact_number = models.CharField(max_length=50, blank=True, null=True)
     authorized_by = models.CharField(max_length=255, blank=True, null=True)
@@ -305,6 +306,34 @@ class Purchase(models.Model):
     )
     cancelled_date = models.DateTimeField(null=True, blank=True)
     status_remark = models.TextField(blank=True, null=True)
+    stage = models.CharField(
+        max_length=20,
+        blank=True,
+        null=True,
+        default=None,
+        choices=[
+            ("ecd_im8", "ECD / IM8"),
+            ("transit_permit", "Transit Permit"),
+            ("closure_guarantee", "Closure Guarantee"),
+            ("done", "Done"),
+            ("cancelled", "Cancelled"),
+        ],
+    )
+    stage_updated_at = models.DateTimeField(null=True, blank=True)
+    stage_updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="+",
+    )
+    assigned_transitor = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="assigned_purchases",
+    )
 
     def __str__(self):
         return f"{self.purchase_number} ({self.buyer})"

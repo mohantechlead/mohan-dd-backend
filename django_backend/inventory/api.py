@@ -66,7 +66,7 @@ def _send_notification_mail(
 
 
 from ninja_jwt.authentication import JWTAuth
-from accounts.models import Partner
+from accounts.models import Partner, User
 from .models import (
     GRN,
     GrnItems,
@@ -123,6 +123,8 @@ from .schemas import (
     PurchaseApproveSchema,
     PurchaseStatusUpdateSchema,
     PurchaseUpdateSchema,
+    PurchaseStageUpdateSchema,
+    PurchaseAssignTransitorSchema,
     MarineInsuranceSchema,
     MarineInsuranceCreateSchema,
     MarineInsuranceUpdateSchema,
@@ -339,6 +341,20 @@ def _require_roles(request, *roles):
             status=403,
         )
     return None
+
+
+def _require_role(request, *roles):
+    """Return None if allowed, or JsonResponse with 401/403 if not.
+
+    Admins and superusers always pass.
+    """
+    user = getattr(request, "user", None)
+    if not user or not user.is_authenticated:
+        return JsonResponse({"detail": "Authentication required."}, status=401)
+    role = getattr(user, "role", "logistics")
+    if role in roles or role == "admin" or getattr(user, "is_superuser", False):
+        return None
+    return JsonResponse({"detail": "Not permitted."}, status=403)
 
 
 def _normalize_partner_lookup_name(name: str) -> str:
@@ -3091,6 +3107,111 @@ def list_missing_marine_insurance_purchases(request):
     ]
 
 
+@router.get("/purchases/my-transits", response=List[PurchaseDetailSchema], auth=JWTAuth())
+def list_my_transits(request):
+    purchases = (
+        Purchase.objects.filter(assigned_transitor=request.user)
+        .prefetch_related("items")
+        .order_by("-purchase_number")
+    )
+    return [_purchase_to_detail_schema(p, request) for p in purchases]
+
+
+@router.post("/purchases/{purchase_number}/stage", response=PurchaseDetailSchema, auth=JWTAuth())
+def update_purchase_stage(request, purchase_number: str, payload: PurchaseStageUpdateSchema):
+    user = getattr(request, "user", None)
+    if not user or not user.is_authenticated:
+        return JsonResponse({"detail": "Authentication required."}, status=401)
+    role = getattr(user, "role", "logistics")
+    is_admin_or_sales = role in ("admin", "sales") or getattr(user, "is_superuser", False)
+    is_transitor = role == "transitor"
+    if not is_admin_or_sales and not is_transitor:
+        return JsonResponse({"detail": "Not permitted."}, status=403)
+
+    stage = payload.stage
+    if stage is not None and stage not in _PURCHASE_ALLOWED_STAGES:
+        return JsonResponse(
+            {
+                "detail": (
+                    "Invalid stage value. Must be one of: "
+                    + ", ".join(_PURCHASE_ALLOWED_STAGES)
+                    + ", or null."
+                )
+            },
+            status=400,
+        )
+
+    purchase = get_object_or_404(
+        Purchase.objects.prefetch_related("items"),
+        purchase_number__iexact=purchase_number.strip(),
+    )
+
+    if not is_admin_or_sales and is_transitor:
+        if purchase.assigned_transitor_id != user.id:
+            return JsonResponse(
+                {"detail": "You are not assigned as the transitor for this purchase."},
+                status=403,
+            )
+        if stage in ("done", "cancelled"):
+            return JsonResponse(
+                {"detail": "Transitors cannot set the stage to done or cancelled."},
+                status=403,
+            )
+        allowed_next = {
+            None: "ecd_im8",
+            "ecd_im8": "transit_permit",
+            "transit_permit": "closure_guarantee",
+        }
+        next_stage = allowed_next.get(purchase.stage)
+        if next_stage is None:
+            return JsonResponse(
+                {
+                    "detail": (
+                        "Transitors can only advance the stage one step forward "
+                        "(not started -> ECD / IM8 -> Transit Permit -> Closure Guarantee)."
+                    )
+                },
+                status=403,
+            )
+        if stage != next_stage:
+            return JsonResponse(
+                {"detail": "Transitors can only advance the stage one step forward to '{0}'.".format(next_stage)},
+                status=403,
+            )
+
+    purchase.stage = stage
+    purchase.stage_updated_at = timezone.now()
+    purchase.stage_updated_by = user
+    purchase.save()
+
+    return _purchase_to_detail_schema(purchase, request)
+
+
+@router.post("/purchases/{purchase_number}/assign-transitor", response=PurchaseDetailSchema, auth=JWTAuth())
+def assign_purchase_transitor(request, purchase_number: str, payload: PurchaseAssignTransitorSchema):
+    err = _require_role(request, "sales")
+    if err:
+        return err
+    purchase = get_object_or_404(
+        Purchase.objects.prefetch_related("items"),
+        purchase_number__iexact=purchase_number.strip(),
+    )
+    if payload.transitor_id is None:
+        purchase.assigned_transitor = None
+    else:
+        try:
+            transitor = User.objects.get(id=payload.transitor_id)
+        except User.DoesNotExist:
+            return JsonResponse({"detail": "Transitor user not found."}, status=400)
+        if not transitor.is_active:
+            return JsonResponse({"detail": "Transitor user is not active."}, status=400)
+        if transitor.role != "transitor":
+            return JsonResponse({"detail": "Target user must have the transitor role."}, status=400)
+        purchase.assigned_transitor = transitor
+    purchase.save()
+    return _purchase_to_detail_schema(purchase, request)
+
+
 @router.get("/purchases/{purchase_number}/marine-insurance", response=MarineInsuranceSchema, auth=JWTAuth())
 def get_purchase_marine_insurance(request, purchase_number: str):
     purchase = get_object_or_404(Purchase, purchase_number__iexact=purchase_number.strip())
@@ -3180,6 +3301,20 @@ def approve_purchase(request, purchase_number: str, payload: PurchaseApproveSche
     return _purchase_to_detail_schema(purchase, request)
 
 
+_PURCHASE_STAGE_LABELS = {
+    "ecd_im8": "ECD / IM8",
+    "transit_permit": "Transit Permit",
+    "closure_guarantee": "Closure Guarantee",
+    "done": "Done",
+    "cancelled": "Cancelled",
+}
+_PURCHASE_ALLOWED_STAGES = tuple(_PURCHASE_STAGE_LABELS.keys())
+
+
+def _purchase_stage_label(stage):
+    return _PURCHASE_STAGE_LABELS.get(stage)
+
+
 def _purchase_to_detail_schema(purchase, request=None):
     payment_value = purchase.payment_terms
     admin_view = _is_admin(request) if request is not None else False
@@ -3221,6 +3356,12 @@ def _purchase_to_detail_schema(purchase, request=None):
         before_vat=float(purchase.before_vat),
         total_quantity=purchase.total_quantity,
         remaining=purchase.remaining,
+        stage=purchase.stage,
+        stage_updated_at=purchase.stage_updated_at.isoformat() if purchase.stage_updated_at else None,
+        stage_updated_by=purchase.stage_updated_by.username if purchase.stage_updated_by else None,
+        assigned_transitor_id=purchase.assigned_transitor_id,
+        assigned_transitor=purchase.assigned_transitor.username if purchase.assigned_transitor else None,
+        stage_label=_purchase_stage_label(purchase.stage),
         items=[
             PurchaseItemSchema(
                 item_id=i.item_id,
@@ -3438,6 +3579,7 @@ def _shipping_invoice_to_detail_schema(invoice: ShippingInvoice):
         bill_of_lading_remark=invoice.bill_of_lading_remark,
         bank=invoice.bank,
         sr_no=invoice.sr_no,
+        destination=invoice.destination,
         destination_contact_name=invoice.destination_contact_name,
         destination_contact_number=invoice.destination_contact_number,
         authorized_by=invoice.authorized_by,
@@ -3492,6 +3634,7 @@ def create_shipping_invoice(request, payload: ShippingInvoiceCreateSchema):
         bill_of_lading_remark=payload.bill_of_lading_remark,
         bank=payload.bank,
         sr_no=sr_no,
+        destination=payload.destination,
         destination_contact_name=payload.destination_contact_name,
         destination_contact_number=payload.destination_contact_number,
     )
@@ -3539,6 +3682,10 @@ def create_shipping_invoice(request, payload: ShippingInvoiceCreateSchema):
         invoice_date=invoice.invoice_date,
         reference_no=invoice.reference_no,
         final_price=float(invoice.final_price) if invoice.final_price is not None else None,
+        sr_no=invoice.sr_no,
+        destination=invoice.destination,
+        destination_contact_name=invoice.destination_contact_name,
+        destination_contact_number=invoice.destination_contact_number,
     )
 
 
@@ -3562,6 +3709,10 @@ def list_shipping_invoices(request, order_number: Optional[str] = None):
                 final_price=float(inv.final_price) if inv.final_price is not None else None,
                 authorized_by=inv.authorized_by,
                 authorized_at=inv.authorized_at.isoformat() if inv.authorized_at else None,
+                sr_no=inv.sr_no,
+                destination=inv.destination,
+                destination_contact_name=inv.destination_contact_name,
+                destination_contact_number=inv.destination_contact_number,
             )
         )
     return result
@@ -3622,6 +3773,7 @@ def update_shipping_invoice(
     invoice.bill_of_lading_remark = payload.bill_of_lading_remark
     invoice.bank = payload.bank
     invoice.sr_no = payload.sr_no
+    invoice.destination = payload.destination
     invoice.destination_contact_name = payload.destination_contact_name
     invoice.destination_contact_number = payload.destination_contact_number
     invoice.save()

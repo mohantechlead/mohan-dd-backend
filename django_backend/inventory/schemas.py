@@ -587,6 +587,12 @@ class PurchaseDetailSchema(Schema):
     before_vat: float
     total_quantity: float
     remaining: float
+    stage: Optional[str] = None
+    stage_updated_at: Optional[str] = None
+    stage_updated_by: Optional[str] = None
+    assigned_transitor_id: Optional[int] = None
+    assigned_transitor: Optional[str] = None
+    stage_label: Optional[str] = None
     items: List[PurchaseItemSchema]
 
 
@@ -598,6 +604,16 @@ class PurchaseStatusUpdateSchema(Schema):
     status: str  # "completed" or "cancelled"
     user_id: int
     remark: Optional[str] = None
+
+
+class PurchaseStageUpdateSchema(Schema):
+    stage: Optional[str] = None  # null allowed = reset to "not started"
+    user_id: Optional[int] = None
+
+
+class PurchaseAssignTransitorSchema(Schema):
+    transitor_id: Optional[int] = None  # null = unassign
+    user_id: Optional[int] = None
 
 
 class PurchaseUpdateSchema(Schema):
@@ -667,6 +683,7 @@ class ShippingInvoiceCreateSchema(Schema):
     bill_of_lading_remark: Optional[str]
     bank: Optional[str] = None
     sr_no: Optional[int] = None
+    destination: Optional[str] = None
     destination_contact_name: Optional[str] = None
     destination_contact_number: Optional[str] = None
     items: List[ShippingInvoiceItemCreateSchema]
@@ -692,6 +709,7 @@ class ShippingInvoiceUpdateSchema(Schema):
     bill_of_lading_remark: Optional[str]
     bank: Optional[str] = None
     sr_no: Optional[int] = None
+    destination: Optional[str] = None
     destination_contact_name: Optional[str] = None
     destination_contact_number: Optional[str] = None
     items: List[ShippingInvoiceItemCreateSchema]
@@ -706,6 +724,10 @@ class ShippingInvoiceSummarySchema(Schema):
     final_price: Optional[float] = None
     authorized_by: Optional[str] = None
     authorized_at: Optional[str] = None
+    sr_no: Optional[int] = None
+    destination: Optional[str] = None
+    destination_contact_name: Optional[str] = None
+    destination_contact_number: Optional[str] = None
 
 
 class ShippingInvoiceItemSchema(Schema):
@@ -750,6 +772,7 @@ class ShippingInvoiceDetailSchema(Schema):
     bill_of_lading_remark: Optional[str]
     bank: Optional[str] = None
     sr_no: Optional[int] = None
+    destination: Optional[str] = None
     destination_contact_name: Optional[str] = None
     destination_contact_number: Optional[str] = None
     authorized_by: Optional[str] = None
