@@ -4357,7 +4357,7 @@ def _check_and_notify_all_warehouse_expiry() -> int:
 
 @router.post("/warehouse-storage-notes", response=WarehouseStorageNoteDetailSchema, auth=JWTAuth())
 def create_warehouse_storage_note(request, payload: WarehouseStorageNoteCreatePayloadSchema):
-    err = _require_roles(request, "admin", "logistics")
+    err = _require_roles(request, *_WAREHOUSE_OPERATOR_ROLES)
     if err:
         return err
     wsn_no = (payload.wsn_no or "").strip() or _next_wsn_number()
