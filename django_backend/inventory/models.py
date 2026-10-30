@@ -670,3 +670,101 @@ class WarehouseAuditLog(models.Model):
 
     class Meta:
         ordering = ["-timestamp"]
+
+
+# ============================================================
+# Quotations (non-binding price offers, similar to a PFI)
+# ============================================================
+
+class Quotation(models.Model):
+    STATUS_CHOICES = (
+        ("draft", "Draft"),
+        ("sent", "Sent"),
+        ("accepted", "Accepted"),
+        ("rejected", "Rejected"),
+        ("expired", "Expired"),
+    )
+
+    id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True, primary_key=True)
+    quotation_number = models.CharField(max_length=255, unique=True)
+    date = models.DateField()
+    customer_name = models.CharField(max_length=255)
+    customer_address = models.CharField(max_length=255, blank=True, null=True)
+    attention = models.CharField(max_length=255, blank=True, null=True)
+    currency = models.CharField(max_length=10, default="USD")
+    validity_date = models.DateField(blank=True, null=True)
+    terms = models.TextField(blank=True, null=True)
+    remark = models.TextField(blank=True, null=True)
+    status = models.CharField(max_length=20, default="draft", choices=STATUS_CHOICES)
+    total_amount = models.DecimalField(max_digits=14, decimal_places=2, default=0)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="created_quotations",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"{self.quotation_number} ({self.customer_name})"
+
+    class Meta:
+        ordering = ["-quotation_number"]
+
+
+class QuotationItem(models.Model):
+    item_id = models.UUIDField(default=uuid.uuid4, editable=False)
+    quotation = models.ForeignKey(
+        Quotation,
+        on_delete=models.CASCADE,
+        to_field="quotation_number",
+        db_column="quotation_number",
+        related_name="items",
+    )
+    item_name = models.CharField(max_length=255)
+    description = models.CharField(max_length=255, blank=True, null=True)
+    hscode = models.CharField(max_length=255, blank=True, null=True)
+    quantity = models.FloatField()
+    measurement = models.CharField(max_length=100, blank=True, null=True)
+    unit_price = models.DecimalField(max_digits=12, decimal_places=2)
+    total_price = models.DecimalField(max_digits=14, decimal_places=2)
+
+    def __str__(self):
+        return f"{self.quotation.quotation_number} - {self.item_name}"
+
+
+# ============================================================
+# Stock adjustments (lost / contaminated stock write-offs)
+# ============================================================
+
+class StockAdjustment(models.Model):
+    REASON_CHOICES = (
+        ("lost", "Lost"),
+        ("contaminated", "Contaminated"),
+    )
+
+    id = models.BigAutoField(primary_key=True, editable=False)
+    code = models.CharField(max_length=100, db_index=True)
+    item_name = models.CharField(max_length=255)
+    quantity = models.FloatField()
+    bags = models.FloatField(blank=True, null=True)
+    unit_measurement = models.CharField(max_length=100, blank=True, null=True)
+    reason = models.CharField(max_length=50, choices=REASON_CHOICES)
+    note = models.TextField(blank=True, null=True)
+    date = models.DateField()
+    adjusted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="stock_adjustments",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.reason} {self.quantity} {self.item_name} ({self.code})"
+
+    class Meta:
+        ordering = ["-created_at"]

@@ -1085,3 +1085,107 @@ class WarehouseDashboardSchema(Schema):
     total_items_remaining: float
     expiring_soon_count: int
     recent_wsns: List[WarehouseStorageNoteDetailSchema]
+
+# ============================================================
+# Quotations
+# ============================================================
+
+class QuotationItemCreateSchema(Schema):
+    item_id: Optional[uuid.UUID] = None
+    item_name: str
+    description: Optional[str] = None
+    hscode: Optional[str] = None
+    quantity: float
+    measurement: Optional[str] = None
+    unit_price: float
+    # If omitted, server calculates quantity * unit_price.
+    total_price: Optional[float] = None
+
+
+class QuotationCreateSchema(Schema):
+    # Leave blank to let the server allocate the next QUO-#### number.
+    quotation_number: Optional[str] = None
+    date: datetime_date
+    customer_name: str
+    customer_address: Optional[str] = None
+    attention: Optional[str] = None
+    currency: Optional[str] = "USD"
+    validity_date: Optional[datetime_date] = None
+    terms: Optional[str] = None
+    remark: Optional[str] = None
+    status: Optional[str] = "draft"
+    items: List[QuotationItemCreateSchema]
+
+
+class QuotationItemSchema(Schema):
+    item_id: uuid.UUID | None = None
+    quotation_number: str
+    item_name: str
+    description: Optional[str] = None
+    hscode: Optional[str] = None
+    quantity: float
+    measurement: Optional[str] = None
+    unit_price: float
+    total_price: float
+
+
+class QuotationDetailSchema(Schema):
+    id: uuid.UUID
+    quotation_number: str
+    date: datetime_date
+    customer_name: str
+    customer_address: Optional[str] = None
+    attention: Optional[str] = None
+    currency: str
+    validity_date: Optional[datetime_date] = None
+    terms: Optional[str] = None
+    remark: Optional[str] = None
+    status: Optional[str] = None
+    total_amount: float
+    created_by: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+    items: List[QuotationItemSchema]
+
+
+class QuotationUpdateSchema(Schema):
+    date: datetime_date
+    customer_name: str
+    customer_address: Optional[str] = None
+    attention: Optional[str] = None
+    currency: Optional[str] = "USD"
+    validity_date: Optional[datetime_date] = None
+    terms: Optional[str] = None
+    remark: Optional[str] = None
+    status: Optional[str] = "draft"
+    items: List[QuotationItemCreateSchema]
+
+
+# ============================================================
+# Stock adjustments
+# ============================================================
+
+class StockAdjustmentCreateSchema(Schema):
+    code: str
+    item_name: str
+    quantity: float
+    bags: Optional[float] = None
+    unit_measurement: Optional[str] = None
+    reason: str
+    note: Optional[str] = None
+    date: Optional[datetime_date] = None
+    user_id: Optional[int] = None
+
+
+class StockAdjustmentSchema(Schema):
+    id: int
+    code: str
+    item_name: str
+    quantity: float
+    bags: Optional[float] = None
+    unit_measurement: Optional[str] = None
+    reason: str
+    note: Optional[str] = None
+    date: datetime_date
+    adjusted_by: Optional[str] = None
+    created_at: Optional[str] = None

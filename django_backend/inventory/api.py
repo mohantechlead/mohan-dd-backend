@@ -9,6 +9,7 @@ from datetime import date as date_type
 from datetime import datetime
 from datetime import timedelta
 from django.shortcuts import get_object_or_404
+from django.db import transaction
 from django.db.models import Q
 from django.core.mail import send_mail
 from django.conf import settings
@@ -91,6 +92,9 @@ from .models import (
     WarehouseStorageEntry,
     WarehouseStorageEntryItem,
     WarehouseSettingsApproval,
+    Quotation,
+    QuotationItem,
+    StockAdjustment,
 )
 from .schemas import (
     GrnCreateSchema,
@@ -163,6 +167,12 @@ from .schemas import (
     WarehouseItemInventorySchema,
     WarehouseItemInventoryNoteSchema,
     WarehouseDashboardSchema,
+    QuotationCreateSchema,
+    QuotationUpdateSchema,
+    QuotationDetailSchema,
+    QuotationItemSchema,
+    StockAdjustmentCreateSchema,
+    StockAdjustmentSchema,
 )
 import uuid
 from django.http import JsonResponse
@@ -265,6 +275,22 @@ def _next_mpddfze_purchase_number(values) -> str:
         return "MPDDFZE001"
     next_n = max_n + 1
     return "MPDDFZE{0:03d}".format(next_n)
+
+
+_QUOTATION_NUMBER_RE = re.compile(r"^QUO-?(\d+)$", re.IGNORECASE)
+
+
+def _next_quotation_number() -> str:
+    """Next sequential quotation number (QUO-0001, QUO-0002, ...)."""
+    max_n = None
+    for val in Quotation.objects.values_list("quotation_number", flat=True):
+        m = _QUOTATION_NUMBER_RE.match(str(val).strip())
+        if m:
+            n = int(m.group(1))
+            max_n = n if max_n is None else max(max_n, n)
+    if max_n is None:
+        return "QUO-0001"
+    return "QUO-{0:04d}".format(max_n + 1)
 
 
 _WS_NUMBER_RE = re.compile(r"^(?:WSN|WRN)-?(\d+)$", re.IGNORECASE)
@@ -541,6 +567,32 @@ def _build_stock_by_code(as_of_date=None):
         bucket["package"] -= float(row.bags or 0)
         if row.dn_id:
             bucket["dn_nos"].add(str(row.dn.dn_no))
+
+    # Manual stock write-offs (lost / contaminated). These reduce stock but are
+    # not tied to a GRN or DN document.
+    adj_qs = StockAdjustment.objects.all()
+    if doc_date:
+        adj_qs = adj_qs.filter(date=doc_date)
+
+    for adj in adj_qs:
+        row_code = (adj.code or "").strip()
+        if not row_code:
+            continue
+        bucket = stock_map.setdefault(
+            row_code,
+            {
+                "item_id": None,
+                "item_name": adj.item_name,
+                "code": row_code,
+                "internal_code": row_code,
+                "quantity": 0.0,
+                "package": 0.0,
+                "grn_nos": set(),
+                "dn_nos": set(),
+            },
+        )
+        bucket["quantity"] -= float(adj.quantity or 0)
+        bucket["package"] -= float(adj.bags or 0)
 
     rows = list(stock_map.values())
     for r in rows:
@@ -2483,6 +2535,74 @@ def display_stock(
     return rows
 
 
+def _stock_adjustment_to_schema(adj: StockAdjustment) -> StockAdjustmentSchema:
+    return StockAdjustmentSchema(
+        id=adj.id,
+        code=adj.code,
+        item_name=adj.item_name,
+        quantity=adj.quantity,
+        bags=adj.bags,
+        unit_measurement=adj.unit_measurement,
+        reason=adj.reason,
+        note=adj.note,
+        date=adj.date,
+        adjusted_by=adj.adjusted_by.username if adj.adjusted_by else None,
+        created_at=adj.created_at.isoformat() if adj.created_at else None,
+    )
+
+
+@router.get(
+    "/stock/adjustments",
+    response=List[StockAdjustmentSchema],
+    auth=JWTAuth(),
+)
+def list_stock_adjustments(request, code: Optional[str] = None):
+    qs = StockAdjustment.objects.select_related("adjusted_by").all()
+    if code:
+        qs = qs.filter(code__iexact=code.strip())
+    return [_stock_adjustment_to_schema(a) for a in qs]
+
+
+@router.post(
+    "/stock/adjustments",
+    response=StockAdjustmentSchema,
+    auth=JWTAuth(),
+)
+def create_stock_adjustment(request, payload: StockAdjustmentCreateSchema):
+    err = _require_roles(request, "admin", "logistics", "store", "inventory")
+    if err:
+        return err
+
+    reason = (payload.reason or "").strip().lower()
+    if reason not in dict(StockAdjustment.REASON_CHOICES):
+        return JsonResponse(
+            {"detail": "Reason must be 'lost' or 'contaminated'."},
+            status=400,
+        )
+    if payload.quantity is None or float(payload.quantity) <= 0:
+        return JsonResponse(
+            {"detail": "Adjustment quantity must be greater than zero."},
+            status=400,
+        )
+    code = (payload.code or "").strip()
+    if not code:
+        return JsonResponse({"detail": "Item code is required."}, status=400)
+
+    user = getattr(request, "user", None)
+    adjustment = StockAdjustment.objects.create(
+        code=code,
+        item_name=payload.item_name,
+        quantity=float(payload.quantity),
+        bags=payload.bags,
+        unit_measurement=payload.unit_measurement,
+        reason=reason,
+        note=payload.note,
+        date=payload.date or timezone.localdate(),
+        adjusted_by=user if user and user.is_authenticated else None,
+    )
+    return _stock_adjustment_to_schema(adjustment)
+
+
 def _parse_as_of_date(value) -> date_type | None:
     if value is None:
         return None
@@ -3487,6 +3607,198 @@ def list_purchases(request):
     for p in purchases:
         result.append(_purchase_to_detail_schema(p, request))
     return result
+
+
+# ============================================================
+# Quotations
+# ============================================================
+
+_QUOTATION_STATUSES = ("draft", "sent", "accepted", "rejected", "expired")
+
+
+def _quotation_to_detail_schema(quotation: Quotation) -> QuotationDetailSchema:
+    return QuotationDetailSchema(
+        id=quotation.id,
+        quotation_number=quotation.quotation_number,
+        date=quotation.date,
+        customer_name=quotation.customer_name,
+        customer_address=quotation.customer_address,
+        attention=quotation.attention,
+        currency=quotation.currency,
+        validity_date=quotation.validity_date,
+        terms=quotation.terms,
+        remark=quotation.remark,
+        status=quotation.status,
+        total_amount=float(quotation.total_amount or 0),
+        created_by=quotation.created_by.username if quotation.created_by else None,
+        created_at=quotation.created_at.isoformat() if quotation.created_at else None,
+        updated_at=quotation.updated_at.isoformat() if quotation.updated_at else None,
+        items=[
+            QuotationItemSchema(
+                item_id=i.item_id,
+                quotation_number=str(i.quotation_id),
+                item_name=i.item_name,
+                description=i.description,
+                hscode=i.hscode,
+                quantity=i.quantity,
+                measurement=i.measurement,
+                unit_price=float(i.unit_price),
+                total_price=float(i.total_price),
+            )
+            for i in quotation.items.all()
+        ],
+    )
+
+
+def _replace_quotation_items(quotation: Quotation, items) -> None:
+    """Replace all line items and recalculate the quotation total."""
+    quotation.items.all().delete()
+    total = Decimal("0")
+    for item in items:
+        line_total = item.total_price
+        if line_total is None:
+            line_total = float(item.quantity or 0) * float(item.unit_price or 0)
+        line_total = Decimal(str(line_total)).quantize(Decimal("0.01"))
+        total += line_total
+        QuotationItem.objects.create(
+            quotation=quotation,
+            item_name=item.item_name,
+            description=item.description,
+            hscode=item.hscode,
+            quantity=item.quantity,
+            measurement=item.measurement,
+            unit_price=item.unit_price,
+            total_price=line_total,
+        )
+    quotation.total_amount = total
+    quotation.save(update_fields=["total_amount", "updated_at"])
+
+
+def _quotation_status_or_error(status):
+    value = (status or "draft").strip().lower()
+    if value not in _QUOTATION_STATUSES:
+        return None
+    return value
+
+
+@router.get("/quotations", response=List[QuotationDetailSchema], auth=JWTAuth())
+def list_quotations(request):
+    quotations = Quotation.objects.prefetch_related("items").order_by("-quotation_number")
+    return [_quotation_to_detail_schema(q) for q in quotations]
+
+
+@router.get("/quotations/next-number", auth=JWTAuth())
+def get_next_quotation_number(request):
+    return {"quotation_number": _next_quotation_number()}
+
+
+@router.post("/quotations", response=QuotationDetailSchema, auth=JWTAuth())
+def create_quotation(request, payload: QuotationCreateSchema):
+    err = _require_roles(request, "admin", "sales")
+    if err:
+        return err
+
+    status = _quotation_status_or_error(payload.status)
+    if status is None:
+        return JsonResponse(
+            {"detail": f"Status must be one of: {', '.join(_QUOTATION_STATUSES)}."},
+            status=400,
+        )
+    if not payload.items:
+        return JsonResponse({"detail": "A quotation needs at least one item."}, status=400)
+
+    number = (payload.quotation_number or "").strip()
+    if not number:
+        number = _next_quotation_number()
+    if Quotation.objects.filter(quotation_number__iexact=number).exists():
+        return JsonResponse(
+            {"detail": f"Quotation number {number} already exists."},
+            status=400,
+        )
+
+    user = getattr(request, "user", None)
+    with transaction.atomic():
+        quotation = Quotation.objects.create(
+            quotation_number=number,
+            date=payload.date,
+            customer_name=payload.customer_name,
+            customer_address=payload.customer_address,
+            attention=payload.attention,
+            currency=(payload.currency or "USD").strip().upper(),
+            validity_date=payload.validity_date,
+            terms=payload.terms,
+            remark=payload.remark,
+            status=status,
+            created_by=user if user and user.is_authenticated else None,
+        )
+        _replace_quotation_items(quotation, payload.items)
+    quotation.refresh_from_db()
+    return _quotation_to_detail_schema(quotation)
+
+
+@router.get(
+    "/quotations/{quotation_number}",
+    response=QuotationDetailSchema,
+    auth=JWTAuth(),
+)
+def get_quotation_detail(request, quotation_number: str):
+    quotation = get_object_or_404(
+        Quotation.objects.prefetch_related("items"),
+        quotation_number__iexact=quotation_number.strip(),
+    )
+    return _quotation_to_detail_schema(quotation)
+
+
+@router.put(
+    "/quotations/{quotation_number}",
+    response=QuotationDetailSchema,
+    auth=JWTAuth(),
+)
+def update_quotation(request, quotation_number: str, payload: QuotationUpdateSchema):
+    err = _require_roles(request, "admin", "sales")
+    if err:
+        return err
+
+    quotation = get_object_or_404(
+        Quotation.objects.prefetch_related("items"),
+        quotation_number__iexact=quotation_number.strip(),
+    )
+    status = _quotation_status_or_error(payload.status)
+    if status is None:
+        return JsonResponse(
+            {"detail": f"Status must be one of: {', '.join(_QUOTATION_STATUSES)}."},
+            status=400,
+        )
+    if not payload.items:
+        return JsonResponse({"detail": "A quotation needs at least one item."}, status=400)
+
+    quotation.date = payload.date
+    quotation.customer_name = payload.customer_name
+    quotation.customer_address = payload.customer_address
+    quotation.attention = payload.attention
+    quotation.currency = (payload.currency or "USD").strip().upper()
+    quotation.validity_date = payload.validity_date
+    quotation.terms = payload.terms
+    quotation.remark = payload.remark
+    quotation.status = status
+    with transaction.atomic():
+        quotation.save()
+        _replace_quotation_items(quotation, payload.items)
+    quotation.refresh_from_db()
+    return _quotation_to_detail_schema(quotation)
+
+
+@router.delete("/quotations/{quotation_number}", auth=JWTAuth())
+def delete_quotation(request, quotation_number: str):
+    err = _require_roles(request, "admin", "sales")
+    if err:
+        return err
+    quotation = get_object_or_404(
+        Quotation,
+        quotation_number__iexact=quotation_number.strip(),
+    )
+    quotation.delete()
+    return {"detail": "Quotation deleted successfully."}
 
 
 def _normalize_item_name_for_match(name: str | None) -> str:
