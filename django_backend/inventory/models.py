@@ -670,3 +670,38 @@ class WarehouseAuditLog(models.Model):
 
     class Meta:
         ordering = ["-timestamp"]
+
+
+# ============================================================
+# Stock adjustments (lost / contaminated stock write-offs)
+# ============================================================
+
+class StockAdjustment(models.Model):
+    REASON_CHOICES = (
+        ("lost", "Lost"),
+        ("contaminated", "Contaminated"),
+    )
+
+    id = models.BigAutoField(primary_key=True, editable=False)
+    code = models.CharField(max_length=100, db_index=True)
+    item_name = models.CharField(max_length=255)
+    quantity = models.FloatField()
+    bags = models.FloatField(blank=True, null=True)
+    unit_measurement = models.CharField(max_length=100, blank=True, null=True)
+    reason = models.CharField(max_length=50, choices=REASON_CHOICES)
+    note = models.TextField(blank=True, null=True)
+    date = models.DateField()
+    adjusted_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="stock_adjustments",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.reason} {self.quantity} {self.item_name} ({self.code})"
+
+    class Meta:
+        ordering = ["-created_at"]

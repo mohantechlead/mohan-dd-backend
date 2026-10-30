@@ -1085,3 +1085,32 @@ class WarehouseDashboardSchema(Schema):
     total_items_remaining: float
     expiring_soon_count: int
     recent_wsns: List[WarehouseStorageNoteDetailSchema]
+
+# ============================================================
+# Stock adjustments
+# ============================================================
+
+class StockAdjustmentCreateSchema(Schema):
+    code: str
+    item_name: str
+    quantity: float
+    bags: Optional[float] = None
+    unit_measurement: Optional[str] = None
+    reason: str
+    note: Optional[str] = None
+    date: Optional[datetime_date] = None
+    user_id: Optional[int] = None
+
+
+class StockAdjustmentSchema(Schema):
+    id: int
+    code: str
+    item_name: str
+    quantity: float
+    bags: Optional[float] = None
+    unit_measurement: Optional[str] = None
+    reason: str
+    note: Optional[str] = None
+    date: datetime_date
+    adjusted_by: Optional[str] = None
+    created_at: Optional[str] = None

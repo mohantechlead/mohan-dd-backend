@@ -91,6 +91,7 @@ from .models import (
     WarehouseStorageEntry,
     WarehouseStorageEntryItem,
     WarehouseSettingsApproval,
+    StockAdjustment,
 )
 from .schemas import (
     GrnCreateSchema,
@@ -163,6 +164,8 @@ from .schemas import (
     WarehouseItemInventorySchema,
     WarehouseItemInventoryNoteSchema,
     WarehouseDashboardSchema,
+    StockAdjustmentCreateSchema,
+    StockAdjustmentSchema,
 )
 import uuid
 from django.http import JsonResponse
@@ -541,6 +544,32 @@ def _build_stock_by_code(as_of_date=None):
         bucket["package"] -= float(row.bags or 0)
         if row.dn_id:
             bucket["dn_nos"].add(str(row.dn.dn_no))
+
+    # Manual stock write-offs (lost / contaminated). These reduce stock but are
+    # not tied to a GRN or DN document.
+    adj_qs = StockAdjustment.objects.all()
+    if doc_date:
+        adj_qs = adj_qs.filter(date=doc_date)
+
+    for adj in adj_qs:
+        row_code = (adj.code or "").strip()
+        if not row_code:
+            continue
+        bucket = stock_map.setdefault(
+            row_code,
+            {
+                "item_id": None,
+                "item_name": adj.item_name,
+                "code": row_code,
+                "internal_code": row_code,
+                "quantity": 0.0,
+                "package": 0.0,
+                "grn_nos": set(),
+                "dn_nos": set(),
+            },
+        )
+        bucket["quantity"] -= float(adj.quantity or 0)
+        bucket["package"] -= float(adj.bags or 0)
 
     rows = list(stock_map.values())
     for r in rows:
@@ -2481,6 +2510,74 @@ def display_stock(
         ]
 
     return rows
+
+
+def _stock_adjustment_to_schema(adj: StockAdjustment) -> StockAdjustmentSchema:
+    return StockAdjustmentSchema(
+        id=adj.id,
+        code=adj.code,
+        item_name=adj.item_name,
+        quantity=adj.quantity,
+        bags=adj.bags,
+        unit_measurement=adj.unit_measurement,
+        reason=adj.reason,
+        note=adj.note,
+        date=adj.date,
+        adjusted_by=adj.adjusted_by.username if adj.adjusted_by else None,
+        created_at=adj.created_at.isoformat() if adj.created_at else None,
+    )
+
+
+@router.get(
+    "/stock/adjustments",
+    response=List[StockAdjustmentSchema],
+    auth=JWTAuth(),
+)
+def list_stock_adjustments(request, code: Optional[str] = None):
+    qs = StockAdjustment.objects.select_related("adjusted_by").all()
+    if code:
+        qs = qs.filter(code__iexact=code.strip())
+    return [_stock_adjustment_to_schema(a) for a in qs]
+
+
+@router.post(
+    "/stock/adjustments",
+    response=StockAdjustmentSchema,
+    auth=JWTAuth(),
+)
+def create_stock_adjustment(request, payload: StockAdjustmentCreateSchema):
+    err = _require_roles(request, "admin", "logistics", "store", "inventory")
+    if err:
+        return err
+
+    reason = (payload.reason or "").strip().lower()
+    if reason not in dict(StockAdjustment.REASON_CHOICES):
+        return JsonResponse(
+            {"detail": "Reason must be 'lost' or 'contaminated'."},
+            status=400,
+        )
+    if payload.quantity is None or float(payload.quantity) <= 0:
+        return JsonResponse(
+            {"detail": "Adjustment quantity must be greater than zero."},
+            status=400,
+        )
+    code = (payload.code or "").strip()
+    if not code:
+        return JsonResponse({"detail": "Item code is required."}, status=400)
+
+    user = getattr(request, "user", None)
+    adjustment = StockAdjustment.objects.create(
+        code=code,
+        item_name=payload.item_name,
+        quantity=float(payload.quantity),
+        bags=payload.bags,
+        unit_measurement=payload.unit_measurement,
+        reason=reason,
+        note=payload.note,
+        date=payload.date or timezone.localdate(),
+        adjusted_by=user if user and user.is_authenticated else None,
+    )
+    return _stock_adjustment_to_schema(adjustment)
 
 
 def _parse_as_of_date(value) -> date_type | None:

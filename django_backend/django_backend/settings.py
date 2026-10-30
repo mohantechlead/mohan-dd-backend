@@ -13,6 +13,30 @@ except ImportError:
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # ==============================
+# Local .env support
+# ==============================
+# Heroku (and any shell export) always wins: existing env vars are never
+# overridden. The file itself is gitignored, so secrets stay local.
+def _load_env_file(path: Path) -> None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and not os.environ.get(key):
+            os.environ[key] = value
+
+
+_load_env_file(Path(__file__).resolve().with_name(".env"))
+_load_env_file(BASE_DIR / ".env")
+
+# ==============================
 # Core settings
 # ==============================
 
@@ -162,18 +186,23 @@ TEMPLATES = [
 WSGI_APPLICATION = "django_backend.wsgi.application"
 
 # ==============================
-# Database (SQLite only)
+# Database
 # ==============================
+# Resolution order:
+#   1. LOCAL_DATABASE_URL  - set in the gitignored .env, pins this machine to
+#                            the local Postgres even if a global DATABASE_URL
+#                            is exported for some other project.
+#   2. DATABASE_URL        - Heroku (and any explicit shell override).
+#   3. Local Postgres      - development default.
+# dj_database_url.config() would read DATABASE_URL itself, so parse the chosen
+# URL directly to make LOCAL_DATABASE_URL authoritative.
+_DATABASE_URL = (
+    os.environ.get("LOCAL_DATABASE_URL")
+    or os.environ.get("DATABASE_URL")
+    or "postgres://postgres:tsedi@localhost:5432/mohanPLC"
+)
 
-DATABASES = {
-    "default": dj_database_url.config(
-        # Use DATABASE_URL env var if set, otherwise fall back to local Postgres.
-        default=os.environ.get(
-            "DATABASE_URL",
-            "postgres://postgres:tsedi@localhost:5432/mohanPLC",
-        ),
-    )
-}
+DATABASES = {"default": dj_database_url.parse(_DATABASE_URL, conn_max_age=0)}
 
 # ==============================
 # Password validation
@@ -315,3 +344,7 @@ NINJA_JWT = {
 
 if django_heroku:
     django_heroku.settings(locals())
+    # django-heroku re-reads DATABASE_URL and would otherwise undo the
+    # LOCAL_DATABASE_URL choice above on developer machines.
+    if os.environ.get("LOCAL_DATABASE_URL"):
+        DATABASES["default"] = dj_database_url.parse(_DATABASE_URL, conn_max_age=0)

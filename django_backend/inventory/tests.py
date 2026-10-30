@@ -506,3 +506,37 @@ class PurchaseCheckpointTests(TestCase):
         self.assertEqual(data["stage"], "done")
         self.assertEqual(data["stage_label"], "Done")
         self.assertEqual(data["stage_updated_by"], "pc_sales")
+
+class StockAdjustmentTests(TestCase):
+    def test_adjustment_reduces_stock_and_bags(self):
+        from inventory.api import _build_stock_by_code
+        from inventory.models import GRN, GrnItems, StockAdjustment
+
+        grn = GRN.objects.create(
+            supplier_name="Supplier",
+            grn_no=9001,
+            purchase_no="MPDDFZE900",
+            date=date.today(),
+        )
+        GrnItems.objects.create(
+            grn=grn,
+            grn_no=9001,
+            item_name="HDPE",
+            code="PE100",
+            quantity=100.0,
+            unit_measurement="KG",
+            bags=10.0,
+        )
+        StockAdjustment.objects.create(
+            code="PE100",
+            item_name="HDPE",
+            quantity=25.0,
+            bags=2.0,
+            reason="lost",
+            date=date.today(),
+        )
+
+        rows = _build_stock_by_code()
+        row = next(r for r in rows if r["code"] == "PE100")
+        self.assertEqual(row["quantity"], 75.0)
+        self.assertEqual(row["package"], 8.0)
