@@ -1112,5 +1112,13 @@ class StockAdjustmentSchema(Schema):
     reason: str
     note: Optional[str] = None
     date: datetime_date
+    status: str = "pending"
     adjusted_by: Optional[str] = None
+    reviewed_by: Optional[str] = None
+    reviewed_at: Optional[str] = None
+    review_remark: Optional[str] = None
     created_at: Optional[str] = None
+
+
+class StockAdjustmentReviewSchema(Schema):
+    remark: Optional[str] = None

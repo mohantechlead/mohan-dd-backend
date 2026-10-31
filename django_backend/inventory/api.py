@@ -166,6 +166,7 @@ from .schemas import (
     WarehouseDashboardSchema,
     StockAdjustmentCreateSchema,
     StockAdjustmentSchema,
+    StockAdjustmentReviewSchema,
 )
 import uuid
 from django.http import JsonResponse
@@ -546,8 +547,9 @@ def _build_stock_by_code(as_of_date=None):
             bucket["dn_nos"].add(str(row.dn.dn_no))
 
     # Manual stock write-offs (lost / contaminated). These reduce stock but are
-    # not tied to a GRN or DN document.
-    adj_qs = StockAdjustment.objects.all()
+    # not tied to a GRN or DN document. Only approved adjustments affect stock;
+    # pending/rejected requests are left untouched.
+    adj_qs = StockAdjustment.objects.filter(status="approved")
     if doc_date:
         adj_qs = adj_qs.filter(date=doc_date)
 
@@ -2523,7 +2525,11 @@ def _stock_adjustment_to_schema(adj: StockAdjustment) -> StockAdjustmentSchema:
         reason=adj.reason,
         note=adj.note,
         date=adj.date,
+        status=adj.status,
         adjusted_by=adj.adjusted_by.username if adj.adjusted_by else None,
+        reviewed_by=adj.reviewed_by.username if adj.reviewed_by else None,
+        reviewed_at=adj.reviewed_at.isoformat() if adj.reviewed_at else None,
+        review_remark=adj.review_remark,
         created_at=adj.created_at.isoformat() if adj.created_at else None,
     )
 
@@ -2533,10 +2539,12 @@ def _stock_adjustment_to_schema(adj: StockAdjustment) -> StockAdjustmentSchema:
     response=List[StockAdjustmentSchema],
     auth=JWTAuth(),
 )
-def list_stock_adjustments(request, code: Optional[str] = None):
-    qs = StockAdjustment.objects.select_related("adjusted_by").all()
+def list_stock_adjustments(request, code: Optional[str] = None, status: str = "all"):
+    qs = StockAdjustment.objects.select_related("adjusted_by", "reviewed_by").all()
     if code:
         qs = qs.filter(code__iexact=code.strip())
+    if status and status != "all":
+        qs = qs.filter(status=status)
     return [_stock_adjustment_to_schema(a) for a in qs]
 
 
@@ -2576,7 +2584,61 @@ def create_stock_adjustment(request, payload: StockAdjustmentCreateSchema):
         note=payload.note,
         date=payload.date or timezone.localdate(),
         adjusted_by=user if user and user.is_authenticated else None,
+        status="pending",
     )
+    return _stock_adjustment_to_schema(adjustment)
+
+
+@router.post(
+    "/stock/adjustments/{adjustment_id}/approve",
+    response=StockAdjustmentSchema,
+    auth=JWTAuth(),
+)
+def approve_stock_adjustment(request, adjustment_id: int):
+    """Approve a pending stock adjustment so it starts reducing stock balances."""
+    err = _require_roles(request, *_WAREHOUSE_FINANCE_ROLES)
+    if err:
+        return err
+    adjustment = get_object_or_404(
+        StockAdjustment.objects.select_related("adjusted_by", "reviewed_by"),
+        id=adjustment_id,
+    )
+    if adjustment.status != "pending":
+        return JsonResponse(
+            {"detail": "This adjustment has already been reviewed."}, status=400
+        )
+    adjustment.status = "approved"
+    adjustment.reviewed_by = request.user
+    adjustment.reviewed_at = timezone.now()
+    adjustment.save()
+    return _stock_adjustment_to_schema(adjustment)
+
+
+@router.post(
+    "/stock/adjustments/{adjustment_id}/reject",
+    response=StockAdjustmentSchema,
+    auth=JWTAuth(),
+)
+def reject_stock_adjustment(
+    request, adjustment_id: int, payload: StockAdjustmentReviewSchema
+):
+    """Reject a pending stock adjustment; it never affects stock balances."""
+    err = _require_roles(request, *_WAREHOUSE_FINANCE_ROLES)
+    if err:
+        return err
+    adjustment = get_object_or_404(
+        StockAdjustment.objects.select_related("adjusted_by", "reviewed_by"),
+        id=adjustment_id,
+    )
+    if adjustment.status != "pending":
+        return JsonResponse(
+            {"detail": "This adjustment has already been reviewed."}, status=400
+        )
+    adjustment.status = "rejected"
+    adjustment.reviewed_by = request.user
+    adjustment.reviewed_at = timezone.now()
+    adjustment.review_remark = (payload.remark or "").strip() or None
+    adjustment.save()
     return _stock_adjustment_to_schema(adjustment)
 
 

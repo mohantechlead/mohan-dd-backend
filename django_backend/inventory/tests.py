@@ -508,9 +508,26 @@ class PurchaseCheckpointTests(TestCase):
         self.assertEqual(data["stage_updated_by"], "pc_sales")
 
 class StockAdjustmentTests(TestCase):
-    def test_adjustment_reduces_stock_and_bags(self):
-        from inventory.api import _build_stock_by_code
-        from inventory.models import GRN, GrnItems, StockAdjustment
+    def setUp(self):
+        import json
+
+        from django.contrib.auth import get_user_model
+        from django.test import Client
+
+        from inventory.models import GRN, GrnItems
+
+        User = get_user_model()
+        self.client = Client()
+        self._json = json
+
+        def make_user(username, role):
+            user = User.objects.create_user(username=username, password="Passw0rd!")
+            user.role = role
+            user.save()
+            return user
+
+        self.admin = make_user("sa_admin", "admin")
+        self.store = make_user("sa_store", "store")
 
         grn = GRN.objects.create(
             supplier_name="Supplier",
@@ -527,16 +544,108 @@ class StockAdjustmentTests(TestCase):
             unit_measurement="KG",
             bags=10.0,
         )
-        StockAdjustment.objects.create(
-            code="PE100",
-            item_name="HDPE",
-            quantity=25.0,
-            bags=2.0,
-            reason="lost",
-            date=date.today(),
+
+    def _auth_headers(self, username, password="Passw0rd!"):
+        resp = self.client.post(
+            "/api/token/pair",
+            data=self._json.dumps({"username": username, "password": password}),
+            content_type="application/json",
         )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        return {"HTTP_AUTHORIZATION": "Bearer " + resp.json()["access"]}
+
+    def _create_adjustment(self, **overrides):
+        from inventory.models import StockAdjustment
+
+        data = {
+            "code": "PE100",
+            "item_name": "HDPE",
+            "quantity": 25.0,
+            "bags": 2.0,
+            "reason": "lost",
+            "date": date.today(),
+        }
+        data.update(overrides)
+        return StockAdjustment.objects.create(**data)
+
+    def _stock_row(self):
+        from inventory.api import _build_stock_by_code
 
         rows = _build_stock_by_code()
-        row = next(r for r in rows if r["code"] == "PE100")
+        return next(r for r in rows if r["code"] == "PE100")
+
+    def test_pending_adjustment_does_not_reduce_stock(self):
+        self._create_adjustment()
+
+        row = self._stock_row()
+        self.assertEqual(row["quantity"], 100.0)
+        self.assertEqual(row["package"], 10.0)
+
+    def test_approved_adjustment_reduces_stock_and_bags(self):
+        self._create_adjustment(status="approved")
+
+        row = self._stock_row()
         self.assertEqual(row["quantity"], 75.0)
         self.assertEqual(row["package"], 8.0)
+
+    def test_rejected_adjustment_does_not_reduce_stock(self):
+        self._create_adjustment(status="rejected")
+
+        row = self._stock_row()
+        self.assertEqual(row["quantity"], 100.0)
+        self.assertEqual(row["package"], 10.0)
+
+    def test_approve_endpoint_marks_adjustment_approved(self):
+        adjustment = self._create_adjustment()
+        headers = self._auth_headers("sa_admin")
+
+        resp = self.client.post(
+            f"/api/inventory/stock/adjustments/{adjustment.id}/approve",
+            **headers,
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        body = resp.json()
+        self.assertEqual(body["status"], "approved")
+        self.assertEqual(body["reviewed_by"], "sa_admin")
+        self.assertIsNotNone(body["reviewed_at"])
+        self.assertEqual(self._stock_row()["quantity"], 75.0)
+
+    def test_reject_endpoint_marks_adjustment_rejected(self):
+        adjustment = self._create_adjustment()
+        headers = self._auth_headers("sa_admin")
+
+        resp = self.client.post(
+            f"/api/inventory/stock/adjustments/{adjustment.id}/reject",
+            data=self._json.dumps({"remark": "Not verified"}),
+            content_type="application/json",
+            **headers,
+        )
+
+        self.assertEqual(resp.status_code, 200, resp.content)
+        body = resp.json()
+        self.assertEqual(body["status"], "rejected")
+        self.assertEqual(body["review_remark"], "Not verified")
+        self.assertEqual(self._stock_row()["quantity"], 100.0)
+
+    def test_store_role_cannot_approve(self):
+        adjustment = self._create_adjustment()
+        headers = self._auth_headers("sa_store")
+
+        resp = self.client.post(
+            f"/api/inventory/stock/adjustments/{adjustment.id}/approve",
+            **headers,
+        )
+
+        self.assertEqual(resp.status_code, 403, resp.content)
+
+    def test_reviewing_twice_is_rejected(self):
+        adjustment = self._create_adjustment(status="approved")
+        headers = self._auth_headers("sa_admin")
+
+        resp = self.client.post(
+            f"/api/inventory/stock/adjustments/{adjustment.id}/approve",
+            **headers,
+        )
+
+        self.assertEqual(resp.status_code, 400, resp.content)
