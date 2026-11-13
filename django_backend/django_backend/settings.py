@@ -77,7 +77,9 @@ WEBSITE_URL = "http://localhost:8000"
 
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=60),
-    "REFRESH_TOKEN_LIFETIME": timedelta(days=7),
+    # Users stay signed in until they log out: the access token is refreshed
+    # automatically while this refresh token is valid.
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=3650),
     "ROTATE_REFRESH_TOKENS": False,
     "BLACKLIST_AFTER_ROTATION": False,
     "UPDATE_LAST_LOGIN": True,
@@ -335,7 +337,9 @@ LOGGING = {
 
 NINJA_JWT = {
     "ACCESS_TOKEN_LIFETIME": datetime.timedelta(minutes=60),
-    "REFRESH_TOKEN_LIFETIME": datetime.timedelta(days=7),
+    # Users stay signed in until they log out: the frontend refreshes the
+    # access token automatically while this refresh token is valid.
+    "REFRESH_TOKEN_LIFETIME": datetime.timedelta(days=3650),
 }
 
 # ==============================
