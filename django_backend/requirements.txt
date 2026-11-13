@@ -19,5 +19,11 @@ django-cors-headers==4.3.1
 gunicorn
 dj-database-url
 whitenoise
-django-heroku==0.3.1
 google-generativeai
+requests==2.34.2
+beautifulsoup4==4.15.0
+curl_cffi>=0.15.0
+websockets>=12.0
+# Browser fallback (Maersk/CMA/Hapag, and BL_BROWSER_CDP_URL on Heroku).
+# No browser binary is bundled; see BL_TRACKING.md.
+patchright>=1.64.0

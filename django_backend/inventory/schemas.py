@@ -507,6 +507,104 @@ class MarineInsuranceReminderSchema(Schema):
     buyer: str
 
 
+class BillOfLadingContainerSchema(Schema):
+    id: Optional[str] = None
+    container_number: str
+    size: str
+    cargo_type: str
+
+
+class BillOfLadingContainerInputSchema(Schema):
+    container_number: str
+    size: str
+    cargo_type: str
+
+
+class BillOfLadingSchema(Schema):
+    id: str
+    bl_number: str
+    bl_date: datetime_date
+    declaration_number: Optional[str] = None
+    declaration_date: Optional[datetime_date] = None
+    customs_value: Optional[float] = None
+    duty_value: Optional[float] = None
+    container_count: int
+    shipping_company_name: Optional[str] = None
+    shipping_company_url: Optional[str] = None
+    transit_status: str
+    transit_status_label: Optional[str] = None
+    tracking_url: Optional[str] = None
+    status_detail: Optional[str] = None
+    status_checked_at: Optional[str] = None
+    vessel_name: Optional[str] = None
+    vessel_imo: Optional[str] = None
+    vessel_mmsi: Optional[str] = None
+    ais_lat: Optional[float] = None
+    ais_lng: Optional[float] = None
+    ais_sog: Optional[float] = None
+    ais_course: Optional[float] = None
+    ais_nav_status: Optional[str] = None
+    ais_last_seen_at: Optional[str] = None
+    tracking_details: dict = {}
+    origin: Optional[str] = None
+    destination: Optional[str] = None
+    eta: Optional[str] = None
+    last_event: Optional[str] = None
+    vessel_voyage: Optional[str] = None
+    last_updated: Optional[str] = None
+    events: list[dict] = []
+    containers: list[BillOfLadingContainerSchema] = []
+    created_at: datetime_value
+    updated_at: datetime_value
+
+
+class BillOfLadingCreateSchema(Schema):
+    bl_number: str
+    bl_date: datetime_date
+    declaration_number: Optional[str] = None
+    declaration_date: Optional[datetime_date] = None
+    customs_value: Optional[float] = None
+    duty_value: Optional[float] = None
+    container_count: int
+    shipping_company_name: Optional[str] = None
+    shipping_company_url: Optional[str] = None
+    vessel_name: Optional[str] = None
+    vessel_imo: Optional[str] = None
+    vessel_mmsi: Optional[str] = None
+    containers: list[BillOfLadingContainerInputSchema] = []
+
+
+class BillOfLadingUpdateSchema(Schema):
+    bl_number: str
+    bl_date: datetime_date
+    declaration_number: Optional[str] = None
+    declaration_date: Optional[datetime_date] = None
+    customs_value: Optional[float] = None
+    duty_value: Optional[float] = None
+    container_count: int
+    shipping_company_name: Optional[str] = None
+    shipping_company_url: Optional[str] = None
+    vessel_name: Optional[str] = None
+    vessel_imo: Optional[str] = None
+    vessel_mmsi: Optional[str] = None
+    containers: list[BillOfLadingContainerInputSchema] = []
+
+
+class BillOfLadingStatusUpdateSchema(Schema):
+    transit_status: str
+    status_detail: Optional[str] = None
+
+
+class TransitDocumentSchema(Schema):
+    id: str
+    document_type: str
+    document_type_label: Optional[str] = None
+    reference_number: str
+    document_date: datetime_date
+    snapshot: dict = {}
+    created_at: datetime_value
+
+
 class PurchaseCreateSchema(Schema):
     purchase_number: str
     proforma_ref_no: str
@@ -593,6 +691,8 @@ class PurchaseDetailSchema(Schema):
     assigned_transitor_id: Optional[int] = None
     assigned_transitor: Optional[str] = None
     stage_label: Optional[str] = None
+    bill_of_lading: Optional[BillOfLadingSchema] = None
+    transit_documents: List[TransitDocumentSchema] = []
     items: List[PurchaseItemSchema]
 
 

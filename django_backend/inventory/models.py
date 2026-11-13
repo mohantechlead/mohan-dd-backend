@@ -355,6 +355,142 @@ class MarineInsurance(models.Model):
         return f"{self.insurance_number} ({self.purchase.purchase_number})"
 
 
+class BillOfLading(models.Model):
+    TRANSIT_STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("in_transit", "In Transit"),
+        ("at_transhipment", "At Transhipment"),
+        ("at_destination", "At Destination Port"),
+        ("arrived", "Arrived"),
+        ("delivered", "Delivered"),
+    ]
+
+    id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True, primary_key=True)
+    purchase = models.OneToOneField(
+        Purchase,
+        on_delete=models.CASCADE,
+        related_name="bill_of_lading",
+    )
+    bl_number = models.CharField(max_length=100)
+    bl_date = models.DateField()
+    # Customs declaration details printed on the letter of guarantee.
+    declaration_number = models.CharField(max_length=100, blank=True, null=True)
+    declaration_date = models.DateField(blank=True, null=True)
+    customs_value = models.DecimalField(
+        max_digits=14, decimal_places=2, blank=True, null=True
+    )
+    duty_value = models.DecimalField(
+        max_digits=14, decimal_places=2, blank=True, null=True
+    )
+    container_count = models.PositiveIntegerField(default=0)
+    shipping_company_name = models.CharField(max_length=255, blank=True, null=True)
+    # Carrier tracking page; may contain a {bl} placeholder replaced with the BL number.
+    shipping_company_url = models.URLField(blank=True, null=True)
+    transit_status = models.CharField(
+        max_length=30,
+        choices=TRANSIT_STATUS_CHOICES,
+        default="pending",
+    )
+    status_detail = models.TextField(blank=True, null=True)
+    status_checked_at = models.DateTimeField(null=True, blank=True)
+    # Vessel identity (filled by scrape or manually).
+    vessel_name = models.CharField(max_length=255, blank=True, null=True)
+    vessel_imo = models.CharField(max_length=20, blank=True, null=True)
+    vessel_mmsi = models.CharField(max_length=20, blank=True, null=True)
+    # Latest AIS position for the vessel (short-lived cache from aisstream).
+    ais_lat = models.FloatField(null=True, blank=True)
+    ais_lng = models.FloatField(null=True, blank=True)
+    ais_sog = models.FloatField(null=True, blank=True)  # speed over ground, knots
+    ais_course = models.FloatField(null=True, blank=True)
+    ais_nav_status = models.CharField(max_length=64, blank=True, null=True)
+    ais_last_seen_at = models.DateTimeField(null=True, blank=True)
+    # Rich tracking details from the last check (route, events, ETA, containers).
+    tracking_details = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"BL {self.bl_number} ({self.purchase.purchase_number})"
+
+
+class BillOfLadingContainer(models.Model):
+    CONTAINER_SIZE_CHOICES = [
+        ("20", "20 ft"),
+        ("40", "40 ft"),
+    ]
+    CARGO_TYPE_CHOICES = [
+        ("hazardous", "Hazardous"),
+        ("non_hazardous", "Non-Hazardous"),
+    ]
+
+    id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True, primary_key=True)
+    bill_of_lading = models.ForeignKey(
+        BillOfLading,
+        on_delete=models.CASCADE,
+        related_name="containers",
+    )
+    container_number = models.CharField(max_length=20)
+    size = models.CharField(max_length=5, choices=CONTAINER_SIZE_CHOICES)
+    cargo_type = models.CharField(max_length=20, choices=CARGO_TYPE_CHOICES)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.container_number} ({self.size}ft)"
+
+
+class DocumentReferenceSequence(models.Model):
+    """Yearly counter used for customs/guarantee letter references.
+
+    References look like ``MP/DD/217/26`` where ``217`` is the running number
+    and ``26`` is the two-digit year.
+    """
+
+    year = models.PositiveSmallIntegerField(unique=True)
+    last_number = models.PositiveIntegerField(default=0)
+
+    def __str__(self):
+        return f"{self.year}: {self.last_number}"
+
+
+class TransitDocument(models.Model):
+    """A printable guarantee letter generated at a transit checkpoint.
+
+    The snapshot stores the BL/purchase values used when the letter was first
+    generated, so reprinting later keeps the same content and reference even
+    if the bill of lading is edited afterwards.
+    """
+
+    DOCUMENT_TYPE_CHOICES = [
+        ("container_guarantee", "Container Guarantee"),
+        ("letter_guarantee", "Letter of Guarantee"),
+        ("closure_guarantee", "Closure of Guarantee Letter"),
+    ]
+
+    id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True, primary_key=True)
+    purchase = models.ForeignKey(
+        Purchase,
+        on_delete=models.CASCADE,
+        related_name="transit_documents",
+    )
+    document_type = models.CharField(max_length=40, choices=DOCUMENT_TYPE_CHOICES)
+    reference_number = models.CharField(max_length=50, unique=True)
+    document_date = models.DateField()
+    snapshot = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["created_at", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["purchase", "document_type"],
+                name="unique_transit_document_per_purchase",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.get_document_type_display()} {self.reference_number}"
+
+
 class PurchaseItem(models.Model):
     item_id = models.UUIDField(default=uuid.uuid4, editable=False)
     # Link to Purchase by business key (purchase_number), not UUID id
