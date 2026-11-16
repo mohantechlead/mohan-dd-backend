@@ -605,6 +605,31 @@ class TransitDocumentSchema(Schema):
     created_at: datetime_value
 
 
+class TransitAdvanceSchema(Schema):
+    id: str
+    purchase_number: str
+    amount: float
+    currency: str = "USD"
+    note: Optional[str] = None
+    status: str
+    status_label: Optional[str] = None
+    requested_by: Optional[str] = None
+    requested_at: Optional[str] = None
+    reviewed_by: Optional[str] = None
+    reviewed_at: Optional[str] = None
+    review_remark: Optional[str] = None
+
+
+class TransitAdvanceRequestSchema(Schema):
+    amount: float
+    currency: Optional[str] = "USD"
+    note: Optional[str] = None
+
+
+class TransitAdvanceReviewSchema(Schema):
+    remark: Optional[str] = None
+
+
 class PurchaseCreateSchema(Schema):
     purchase_number: str
     proforma_ref_no: str
@@ -693,7 +718,15 @@ class PurchaseDetailSchema(Schema):
     stage_label: Optional[str] = None
     bill_of_lading: Optional[BillOfLadingSchema] = None
     transit_documents: List[TransitDocumentSchema] = []
+    advance: Optional[TransitAdvanceSchema] = None
     items: List[PurchaseItemSchema]
+
+
+class TransitAdvanceDetailSchema(Schema):
+    """Admin review view: the advance together with its purchase detail."""
+
+    advance: TransitAdvanceSchema
+    purchase: PurchaseDetailSchema
 
 
 class PurchaseApproveSchema(Schema):

@@ -491,6 +491,57 @@ class TransitDocument(models.Model):
         return f"{self.get_document_type_display()} {self.reference_number}"
 
 
+class TransitAdvance(models.Model):
+    """A transitor's monetary advance for a transit, awaiting admin approval.
+
+    One advance per purchase. The assigned transitor requests it (amount +
+    note); an admin reviews it. Transit letters (``TransitDocument``) may only
+    be printed by the transitor once the advance has been approved.
+    """
+
+    STATUS_CHOICES = [
+        ("pending", "Pending"),
+        ("approved", "Approved"),
+        ("rejected", "Rejected"),
+    ]
+
+    id = models.UUIDField(default=uuid.uuid4, editable=False, unique=True, primary_key=True)
+    purchase = models.OneToOneField(
+        Purchase,
+        on_delete=models.CASCADE,
+        related_name="transit_advance",
+    )
+    amount = models.DecimalField(max_digits=14, decimal_places=2)
+    currency = models.CharField(max_length=10, default="USD")
+    note = models.TextField(blank=True, null=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
+    requested_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="transit_advance_requests",
+    )
+    requested_at = models.DateTimeField(auto_now_add=True)
+    reviewed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        null=True,
+        blank=True,
+        on_delete=models.SET_NULL,
+        related_name="transit_advance_reviews",
+    )
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    review_remark = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["-requested_at", "id"]
+
+    def __str__(self):
+        return f"Advance {self.amount} {self.currency} ({self.get_status_display()})"
+
+
 class PurchaseItem(models.Model):
     item_id = models.UUIDField(default=uuid.uuid4, editable=False)
     # Link to Purchase by business key (purchase_number), not UUID id

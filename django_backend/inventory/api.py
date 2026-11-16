@@ -13,6 +13,7 @@ from django.shortcuts import get_object_or_404
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.core.mail import send_mail
+from django.core.exceptions import ObjectDoesNotExist
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
@@ -88,6 +89,7 @@ from .models import (
     BillOfLadingContainer,
     DocumentReferenceSequence,
     TransitDocument,
+    TransitAdvance,
     WarehouseStorageNote,
     WarehouseStorageItem,
     ExpirationFeeTier,
@@ -141,6 +143,10 @@ from .schemas import (
     BillOfLadingStatusUpdateSchema,
     BillOfLadingContainerSchema,
     TransitDocumentSchema,
+    TransitAdvanceSchema,
+    TransitAdvanceRequestSchema,
+    TransitAdvanceReviewSchema,
+    TransitAdvanceDetailSchema,
     ShippingInvoiceCreateSchema,
     ShippingInvoiceSummarySchema,
     ShippingInvoiceDetailSchema,
@@ -3124,7 +3130,12 @@ def list_my_transits(request):
     purchases = (
         Purchase.objects.filter(assigned_transitor=request.user)
         .select_related("bill_of_lading")
-        .prefetch_related("items", "bill_of_lading__containers", "transit_documents")
+        .prefetch_related(
+            "items",
+            "bill_of_lading__containers",
+            "transit_documents",
+            "transit_advance",
+        )
         .order_by("-purchase_number")
     )
     return [_purchase_to_detail_schema(p, request) for p in purchases]
@@ -3591,6 +3602,55 @@ def _transit_document_to_schema(document: TransitDocument) -> TransitDocumentSch
     )
 
 
+def _purchase_transit_advance(purchase) -> Optional[TransitAdvance]:
+    """Return the transit advance linked to a purchase, or None. Never raises."""
+    try:
+        return purchase.transit_advance
+    except ObjectDoesNotExist:
+        return None
+
+
+def _transit_documents_locked_for(user, purchase) -> bool:
+    """Transitors may only print transit letters after the admin approved the advance.
+
+    Admins and the other office roles always see the letters; a transitor needs
+    an approved ``TransitAdvance`` for the purchase.
+    """
+    if user is None or not getattr(user, "is_authenticated", False):
+        return False
+    if getattr(user, "role", None) != "transitor":
+        return False
+    advance = _purchase_transit_advance(purchase)
+    return not (advance is not None and advance.status == "approved")
+
+
+def _transit_advance_to_schema(advance: Optional[TransitAdvance]) -> Optional[TransitAdvanceSchema]:
+    if advance is None:
+        return None
+    return TransitAdvanceSchema(
+        id=str(advance.id),
+        purchase_number=advance.purchase.purchase_number,
+        amount=float(advance.amount),
+        currency=advance.currency,
+        note=advance.note,
+        status=advance.status,
+        status_label=advance.get_status_display(),
+        requested_by=advance.requested_by.username if advance.requested_by else None,
+        requested_at=advance.requested_at.isoformat() if advance.requested_at else None,
+        reviewed_by=advance.reviewed_by.username if advance.reviewed_by else None,
+        reviewed_at=advance.reviewed_at.isoformat() if advance.reviewed_at else None,
+        review_remark=advance.review_remark,
+    )
+
+
+def _transit_advance_detail_to_schema(advance: TransitAdvance, request) -> TransitAdvanceDetailSchema:
+    """Advance + full purchase detail (what the admin sees on review)."""
+    return TransitAdvanceDetailSchema(
+        advance=_transit_advance_to_schema(advance),
+        purchase=_purchase_to_detail_schema(advance.purchase, request),
+    )
+
+
 @router.get(
     "/purchases/{purchase_number}/bl",
     response=BillOfLadingSchema,
@@ -3741,10 +3801,202 @@ def list_purchase_transit_documents(request, purchase_number: str):
         Purchase.objects.prefetch_related("transit_documents"),
         purchase_number__iexact=purchase_number.strip(),
     )
+    if _transit_documents_locked_for(getattr(request, "user", None), purchase):
+        return JsonResponse(
+            {
+                "detail": (
+                    "Transit letters are locked until an admin approves "
+                    "this transit's advance."
+                )
+            },
+            status=403,
+        )
     return [
         _transit_document_to_schema(document)
         for document in purchase.transit_documents.all()
     ]
+
+
+# ============================================================
+# Transit advance (requested by the transitor, approved by admin)
+# ============================================================
+
+def _advance_requester_allowed(request, purchase) -> bool:
+    """Only the assigned transitor (or an admin) may request/view the advance."""
+    user = getattr(request, "user", None)
+    if user is None or not user.is_authenticated:
+        return False
+    role = getattr(user, "role", "logistics")
+    if role == "admin" or getattr(user, "is_superuser", False):
+        return True
+    return role == "transitor" and purchase.assigned_transitor_id == user.id
+
+
+@router.post(
+    "/purchases/{purchase_number}/advance",
+    response=TransitAdvanceSchema,
+    auth=JWTAuth(),
+)
+def request_transit_advance(
+    request, purchase_number: str, payload: TransitAdvanceRequestSchema
+):
+    """The assigned transitor requests (or updates) the advance for a transit.
+
+    While pending, the amount/note can be updated; after a rejection the
+    request goes back to pending. An approved advance is final.
+    """
+    purchase = get_object_or_404(
+        Purchase.objects.prefetch_related("items"),
+        purchase_number__iexact=purchase_number.strip(),
+    )
+    if not _advance_requester_allowed(request, purchase):
+        return JsonResponse(
+            {
+                "detail": (
+                    "Only the assigned transitor or an admin can manage "
+                    "the transit advance."
+                )
+            },
+            status=403,
+        )
+    amount = payload.amount
+    if amount is None or amount <= 0:
+        return JsonResponse(
+            {"detail": "Advance amount must be greater than zero."}, status=400
+        )
+    currency = (payload.currency or "USD").strip().upper()
+    if currency not in _VALID_CURRENCIES:
+        return JsonResponse(
+            {"detail": f"Invalid currency. Allowed: {', '.join(_VALID_CURRENCIES)}."},
+            status=400,
+        )
+    note = (payload.note or "").strip() or None
+
+    advance = _purchase_transit_advance(purchase)
+    if advance is not None and advance.status == "approved":
+        return JsonResponse(
+            {"detail": "The advance for this transit has already been approved."},
+            status=400,
+        )
+    if advance is None:
+        advance = TransitAdvance.objects.create(
+            purchase=purchase,
+            amount=amount,
+            currency=currency,
+            note=note,
+            requested_by=getattr(request, "user", None),
+        )
+    else:
+        advance.amount = amount
+        advance.currency = currency
+        advance.note = note
+        advance.status = "pending"
+        advance.requested_by = getattr(request, "user", None)
+        advance.reviewed_by = None
+        advance.reviewed_at = None
+        advance.review_remark = None
+        advance.save()
+    return _transit_advance_to_schema(advance)
+
+
+@router.get(
+    "/purchases/{purchase_number}/advance",
+    response=Optional[TransitAdvanceSchema],
+    auth=JWTAuth(),
+)
+def get_purchase_transit_advance(request, purchase_number: str):
+    """View the advance for a transit (assigned transitor or admin)."""
+    purchase = get_object_or_404(Purchase, purchase_number__iexact=purchase_number.strip())
+    if not _advance_requester_allowed(request, purchase):
+        return JsonResponse(
+            {"detail": "Not permitted."},
+            status=403,
+        )
+    return _transit_advance_to_schema(_purchase_transit_advance(purchase))
+
+
+@router.get(
+    "/transit-advances",
+    response=List[TransitAdvanceDetailSchema],
+    auth=JWTAuth(),
+)
+def list_transit_advances(request, status: str = "pending"):
+    """Admin inbox: every transit advance with its purchase detail."""
+    err = _require_admin(request)
+    if err:
+        return err
+    qs = TransitAdvance.objects.select_related(
+        "purchase",
+        "purchase__assigned_transitor",
+        "purchase__bill_of_lading",
+        "requested_by",
+        "reviewed_by",
+    ).prefetch_related(
+        "purchase__items",
+        "purchase__transit_documents",
+        "purchase__bill_of_lading__containers",
+    )
+    if status and status != "all":
+        qs = qs.filter(status=status)
+    return [_transit_advance_detail_to_schema(advance, request) for advance in qs]
+
+
+@router.post(
+    "/transit-advances/{advance_id}/approve",
+    response=TransitAdvanceDetailSchema,
+    auth=JWTAuth(),
+)
+def approve_transit_advance(request, advance_id: uuid.UUID):
+    """Approve a pending advance; returns the advance + purchase detail."""
+    err = _require_admin(request)
+    if err:
+        return err
+    advance = get_object_or_404(
+        TransitAdvance.objects.select_related(
+            "purchase", "requested_by", "reviewed_by"
+        ),
+        id=advance_id,
+    )
+    if advance.status != "pending":
+        return JsonResponse(
+            {"detail": "This advance has already been reviewed."}, status=400
+        )
+    advance.status = "approved"
+    advance.reviewed_by = request.user
+    advance.reviewed_at = timezone.now()
+    advance.review_remark = None
+    advance.save()
+    return _transit_advance_detail_to_schema(advance, request)
+
+
+@router.post(
+    "/transit-advances/{advance_id}/reject",
+    response=TransitAdvanceDetailSchema,
+    auth=JWTAuth(),
+)
+def reject_transit_advance(
+    request, advance_id: uuid.UUID, payload: TransitAdvanceReviewSchema
+):
+    """Reject a pending advance (optional remark); returns advance + purchase."""
+    err = _require_admin(request)
+    if err:
+        return err
+    advance = get_object_or_404(
+        TransitAdvance.objects.select_related(
+            "purchase", "requested_by", "reviewed_by"
+        ),
+        id=advance_id,
+    )
+    if advance.status != "pending":
+        return JsonResponse(
+            {"detail": "This advance has already been reviewed."}, status=400
+        )
+    advance.status = "rejected"
+    advance.reviewed_by = request.user
+    advance.reviewed_at = timezone.now()
+    advance.review_remark = (payload.remark or "").strip() or None
+    advance.save()
+    return _transit_advance_detail_to_schema(advance, request)
 
 
 class BillOfLadingCheckStatusResponse(Schema):
@@ -4122,7 +4374,10 @@ def check_purchase_bl_status(request, purchase_number: str):
 def get_purchase_detail(request, purchase_number: str):
     purchase = get_object_or_404(
         Purchase.objects.select_related("bill_of_lading").prefetch_related(
-            "items", "bill_of_lading__containers", "transit_documents"
+            "items",
+            "bill_of_lading__containers",
+            "transit_documents",
+            "transit_advance",
         ),
         purchase_number__iexact=purchase_number.strip(),
     )
@@ -4221,10 +4476,18 @@ def _purchase_to_detail_schema(purchase, request=None):
             if (bl := _purchase_bill_of_lading(purchase)) is not None
             else None
         ),
-        transit_documents=[
-            _transit_document_to_schema(document)
-            for document in purchase.transit_documents.all()
-        ],
+        transit_documents=(
+            [
+                _transit_document_to_schema(document)
+                for document in purchase.transit_documents.all()
+            ]
+            if not _transit_documents_locked_for(
+                getattr(request, "user", None) if request is not None else None,
+                purchase,
+            )
+            else []
+        ),
+        advance=_transit_advance_to_schema(_purchase_transit_advance(purchase)),
         items=[
             PurchaseItemSchema(
                 item_id=i.item_id,
