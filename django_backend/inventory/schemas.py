@@ -608,9 +608,8 @@ class TransitDocumentSchema(Schema):
 class TransitAdvanceSchema(Schema):
     id: str
     purchase_number: str
-    amount: float
-    currency: str = "USD"
-    note: Optional[str] = None
+    target_stage: Optional[str] = None
+    target_stage_label: Optional[str] = None
     status: str
     status_label: Optional[str] = None
     requested_by: Optional[str] = None
@@ -621,9 +620,9 @@ class TransitAdvanceSchema(Schema):
 
 
 class TransitAdvanceRequestSchema(Schema):
-    amount: float
-    currency: Optional[str] = "USD"
-    note: Optional[str] = None
+    """A plain request to advance to the next stage -- no form fields."""
+
+    pass
 
 
 class TransitAdvanceReviewSchema(Schema):

@@ -441,8 +441,8 @@ class BillOfLadingContainer(models.Model):
 class DocumentReferenceSequence(models.Model):
     """Yearly counter used for customs/guarantee letter references.
 
-    References look like ``MP/DD/217/26`` where ``217`` is the running number
-    and ``26`` is the two-digit year.
+    References look like ``MPN/DDFT/217/26`` where ``217`` is the running
+    number and ``26`` is the two-digit year.
     """
 
     year = models.PositiveSmallIntegerField(unique=True)
@@ -492,11 +492,12 @@ class TransitDocument(models.Model):
 
 
 class TransitAdvance(models.Model):
-    """A transitor's monetary advance for a transit, awaiting admin approval.
+    """A transitor's request to advance a purchase to its next transit stage.
 
-    One advance per purchase. The assigned transitor requests it (amount +
-    note); an admin reviews it. Transit letters (``TransitDocument``) may only
-    be printed by the transitor once the advance has been approved.
+    One request per purchase. The assigned transitor asks to move forward
+    (ECD/IM8 -> Transit Permit -> Closure Guarantee); an admin reviews it.
+    The transitor may not move the stage -- and so may not generate or print
+    the guarantee letters (``TransitDocument``) -- until it is approved.
     """
 
     STATUS_CHOICES = [
@@ -511,9 +512,8 @@ class TransitAdvance(models.Model):
         on_delete=models.CASCADE,
         related_name="transit_advance",
     )
-    amount = models.DecimalField(max_digits=14, decimal_places=2)
-    currency = models.CharField(max_length=10, default="USD")
-    note = models.TextField(blank=True, null=True)
+    # The stage the transitor is asking to move to (e.g. "transit_permit").
+    target_stage = models.CharField(max_length=40, blank=True, null=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default="pending")
     requested_by = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -539,7 +539,7 @@ class TransitAdvance(models.Model):
         ordering = ["-requested_at", "id"]
 
     def __str__(self):
-        return f"Advance {self.amount} {self.currency} ({self.get_status_display()})"
+        return f"Advance to {self.target_stage or '?'} ({self.get_status_display()})"
 
 
 class PurchaseItem(models.Model):

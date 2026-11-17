@@ -358,11 +358,9 @@ class PurchaseCheckpointTests(TestCase):
             **self._auth_headers(username),
         )
 
-    def _approve_advance_for(self, purchase_number, username="pc_transitor", amount=1500):
-        """Request an advance as the transitor and approve it as the admin."""
-        resp = self._post_advance(
-            purchase_number, {"amount": amount, "note": "transit costs"}, username
-        )
+    def _approve_advance_for(self, purchase_number, username="pc_transitor"):
+        """Ask for the next stage as the transitor and approve it as the admin."""
+        resp = self._post_advance(purchase_number, {}, username)
         self.assertEqual(resp.status_code, 200, resp.content)
         advance_id = resp.json()["id"]
         resp = self._review_advance(advance_id, "approve", "pc_admin")
@@ -373,6 +371,8 @@ class PurchaseCheckpointTests(TestCase):
         self.purchase.assigned_transitor = self.transitor
         self.purchase.save()
 
+        # Every step of the walk needs its own admin-approved advance.
+        self._approve_advance_for("MPDDFZE901")
         resp = self._post_stage("MPDDFZE901", {"stage": "ecd_im8"}, "pc_transitor")
         self.assertEqual(resp.status_code, 200, resp.content)
         data = resp.json()
@@ -382,7 +382,7 @@ class PurchaseCheckpointTests(TestCase):
         self.assertEqual(data["assigned_transitor"], "pc_transitor")
         self.assertIsNotNone(data["stage_updated_at"])
 
-        # Letters stay locked for the transitor until the admin approves the advance.
+        # The next step is only reachable once the admin approves its advance.
         self._approve_advance_for("MPDDFZE901")
 
         resp = self._post_stage("MPDDFZE901", {"stage": "transit_permit"}, "pc_transitor")
@@ -402,7 +402,14 @@ class PurchaseCheckpointTests(TestCase):
             documents["letter_guarantee"]["reference_number"],
         )
         for document in documents.values():
-            self.assertTrue(document["reference_number"].startswith("MP/DD/"))
+            self.assertTrue(document["reference_number"].startswith("MPN/DDFT/"))
+        # The new series counts from 001: 001/26 then 002/26 for 2026.
+        self.assertEqual(
+            documents["container_guarantee"]["reference_number"], "MPN/DDFT/001/26"
+        )
+        self.assertEqual(
+            documents["letter_guarantee"]["reference_number"], "MPN/DDFT/002/26"
+        )
         self.assertEqual(
             documents["container_guarantee"]["snapshot"]["containers"][0][
                 "container_number"
@@ -410,6 +417,8 @@ class PurchaseCheckpointTests(TestCase):
             "MSCU901001",
         )
 
+        # Advancing to Closure Guarantee needs its own approval too.
+        self._approve_advance_for("MPDDFZE901")
         resp = self._post_stage("MPDDFZE901", {"stage": "closure_guarantee"}, "pc_transitor")
         self.assertEqual(resp.status_code, 200, resp.content)
         data = resp.json()
@@ -434,6 +443,7 @@ class PurchaseCheckpointTests(TestCase):
         self.purchase.stage = "ecd_im8"
         self.purchase.save()
         self.purchase.bill_of_lading.delete()
+        self._approve_advance_for("MPDDFZE901")
 
         resp = self._post_stage(
             "MPDDFZE901", {"stage": "transit_permit"}, "pc_transitor"
@@ -463,6 +473,36 @@ class PurchaseCheckpointTests(TestCase):
         resp = self._post_stage("MPDDFZE901", {"stage": "transit_permit"}, "pc_transitor")
         self.assertEqual(resp.status_code, 403)
 
+    def test_transitor_blocked_until_advance_approved(self):
+        self.purchase.assigned_transitor = self.transitor
+        self.purchase.stage = "ecd_im8"
+        self.purchase.save()
+
+        # Nothing filed yet: the stage will not move.
+        resp = self._post_stage("MPDDFZE901", {"stage": "transit_permit"}, "pc_transitor")
+        self.assertEqual(resp.status_code, 403)
+        self.assertIn("approve", resp.json()["detail"].lower())
+
+        advance = self._post_advance("MPDDFZE901", {}, "pc_transitor")
+        self.assertEqual(advance.status_code, 200, advance.content)
+        self.assertEqual(advance.json()["target_stage"], "transit_permit")
+
+        # Pending: still blocked.
+        resp = self._post_stage("MPDDFZE901", {"stage": "transit_permit"}, "pc_transitor")
+        self.assertEqual(resp.status_code, 403)
+
+        # Approved: the transitor advances and the letters are generated.
+        resp = self._review_advance(advance.json()["id"], "approve", "pc_admin")
+        self.assertEqual(resp.status_code, 200, resp.content)
+
+        resp = self._post_stage("MPDDFZE901", {"stage": "transit_permit"}, "pc_transitor")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        data = resp.json()
+        self.assertEqual(data["stage"], "transit_permit")
+        self.assertEqual(
+            {d["document_type"] for d in data["transit_documents"]},
+            {"container_guarantee", "letter_guarantee"},
+        )
     def test_transitor_blocked_from_non_assigned_purchase(self):
         self.other_purchase.assigned_transitor = self.transitor2
         self.other_purchase.save()
@@ -614,6 +654,7 @@ class PurchaseCheckpointTests(TestCase):
 
         steps = ["ecd_im8", "transit_permit", "closure_guarantee"]
         for step in steps:
+            self._approve_advance_for("MPDDFZE901")
             resp = self._post_stage("MPDDFZE901", {"stage": step}, "pc_transitor")
             self.assertEqual(resp.status_code, 200, resp.content)
             self.assertEqual(resp.json()["stage"], step)
@@ -709,7 +750,7 @@ class TransitAdvanceTests(TestCase):
     def _request_advance(self, body=None, username="ta_transitor"):
         return self._post(
             "/api/inventory/purchases/MPDDFZE801/advance",
-            body or {"amount": 2000, "currency": "USD", "note": "fuel and tolls"},
+            body if body is not None else {},
             username,
         )
 
@@ -738,8 +779,11 @@ class TransitAdvanceTests(TestCase):
         data = resp.json()
         self.assertEqual(data["status"], "pending")
         self.assertEqual(data["status_label"], "Pending")
-        self.assertEqual(data["amount"], 2000.0)
-        self.assertEqual(data["currency"], "USD")
+        # A plain request: it only names the stage being asked for.
+        self.assertEqual(data["target_stage"], "transit_permit")
+        self.assertEqual(data["target_stage_label"], "Transit Permit")
+        for money_field in ("amount", "currency", "note"):
+            self.assertNotIn(money_field, data)
         self.assertEqual(data["purchase_number"], "MPDDFZE801")
         self.assertEqual(data["requested_by"], "ta_transitor")
 
@@ -762,7 +806,7 @@ class TransitAdvanceTests(TestCase):
 
         resp = self.client.post(
             "/api/inventory/purchases/MPDDFZE801/advance",
-            data=self._json.dumps({"amount": 100}),
+            data=self._json.dumps({}),
             content_type="application/json",
         )
         self.assertEqual(resp.status_code, 401)
@@ -775,14 +819,13 @@ class TransitAdvanceTests(TestCase):
         resp = self._get("/api/inventory/purchases/MPDDFZE801/advance", "ta_sales")
         self.assertEqual(resp.status_code, 403)
 
-    def test_invalid_amount_or_currency_rejected(self):
-        resp = self._request_advance({"amount": 0})
-        self.assertEqual(resp.status_code, 400)
-        self.assertIn("greater than zero", resp.json()["detail"])
+    def test_no_request_once_the_final_stage_is_reached(self):
+        self.purchase.stage = "closure_guarantee"
+        self.purchase.save()
 
-        resp = self._request_advance({"amount": 100, "currency": "XYZ"})
+        resp = self._request_advance()
         self.assertEqual(resp.status_code, 400)
-        self.assertIn("Invalid currency", resp.json()["detail"])
+        self.assertIn("final stage", resp.json()["detail"])
 
         resp = self._get("/api/inventory/purchases/MPDDFZE801/advance", "ta_transitor")
         self.assertEqual(resp.status_code, 200)
@@ -817,6 +860,7 @@ class TransitAdvanceTests(TestCase):
         data = resp.json()
         self.assertEqual(data["advance"]["status"], "approved")
         self.assertEqual(data["advance"]["status_label"], "Approved")
+        self.assertEqual(data["advance"]["target_stage"], "transit_permit")
         self.assertEqual(data["advance"]["reviewed_by"], "ta_admin")
         self.assertIsNotNone(data["advance"]["reviewed_at"])
         # Full purchase detail accompanies the approval.
@@ -844,42 +888,40 @@ class TransitAdvanceTests(TestCase):
     def test_rejected_advance_can_be_resubmitted(self):
         advance = self._request_advance().json()
 
-        resp = self._reject(advance["id"], {"remark": "amount too high"})
+        resp = self._reject(advance["id"], {"remark": "hold off for now"})
         self.assertEqual(resp.status_code, 200, resp.content)
         data = resp.json()
         self.assertEqual(data["advance"]["status"], "rejected")
-        self.assertEqual(data["advance"]["review_remark"], "amount too high")
+        self.assertEqual(data["advance"]["review_remark"], "hold off for now")
         self.assertEqual(data["advance"]["reviewed_by"], "ta_admin")
 
-        # Rejected -> the transitor can fix and resubmit.
-        resp = self._request_advance({"amount": 1200, "note": "revised"})
+        # Rejected -> the transitor can simply ask again.
+        resp = self._request_advance()
         self.assertEqual(resp.status_code, 200, resp.content)
         data = resp.json()
         self.assertEqual(data["status"], "pending")
-        self.assertEqual(data["amount"], 1200.0)
+        self.assertEqual(data["target_stage"], "transit_permit")
         self.assertIsNone(data["reviewed_by"])
         self.assertIsNone(data["review_remark"])
 
         resp = self._approve(advance["id"])
         self.assertEqual(resp.status_code, 200, resp.content)
 
-        # Approved advances are final.
-        resp = self._request_advance({"amount": 5000})
+        # Approved advances are final for that stage.
+        resp = self._request_advance()
         self.assertEqual(resp.status_code, 400)
         self.assertIn("already been approved", resp.json()["detail"])
 
     # ------------------------------------------------------------
-    # Letter printing gate
+    # Stage advance + letter printing gate
     # ------------------------------------------------------------
 
-    def _generate_letters(self):
-        resp = self._stage("transit_permit")
-        self.assertEqual(resp.status_code, 200, resp.content)
-
     def test_letters_locked_until_advance_approved(self):
-        self._generate_letters()
+        # Nothing filed yet: no move, no letters to print.
+        resp = self._stage("transit_permit")
+        self.assertEqual(resp.status_code, 403)
+        self.assertIn("approve", resp.json()["detail"].lower())
 
-        # No advance yet: the transitor cannot print anything.
         resp = self._get(
             "/api/inventory/purchases/MPDDFZE801/transit-documents", "ta_transitor"
         )
@@ -890,23 +932,25 @@ class TransitAdvanceTests(TestCase):
         self.assertEqual(resp.status_code, 200, resp.content)
         self.assertEqual(resp.json()["transit_documents"], [])
 
-        # Admin still sees the letters (needed for review).
-        resp = self._get(
-            "/api/inventory/purchases/MPDDFZE801/transit-documents", "ta_admin"
-        )
-        self.assertEqual(resp.status_code, 200, resp.content)
-        self.assertEqual(len(resp.json()), 2)
-
         # Transitor requests the advance; still locked while pending.
         advance = self._request_advance().json()
+        resp = self._stage("transit_permit")
+        self.assertEqual(resp.status_code, 403)
         resp = self._get(
             "/api/inventory/purchases/MPDDFZE801/transit-documents", "ta_transitor"
         )
         self.assertEqual(resp.status_code, 403)
 
-        # Admin approves -> letters unlock for the transitor.
+        # Admin approves -> the move happens and the letters it creates print.
         resp = self._approve(advance["id"])
         self.assertEqual(resp.status_code, 200, resp.content)
+
+        resp = self._stage("transit_permit")
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(
+            {d["document_type"] for d in resp.json()["transit_documents"]},
+            {"container_guarantee", "letter_guarantee"},
+        )
 
         resp = self._get(
             "/api/inventory/purchases/MPDDFZE801/transit-documents", "ta_transitor"
@@ -924,10 +968,19 @@ class TransitAdvanceTests(TestCase):
         self.assertEqual(len(data["transit_documents"]), 2)
         self.assertEqual(data["advance"]["status"], "approved")
 
+        # Admin still sees the letters (needed for review).
+        resp = self._get(
+            "/api/inventory/purchases/MPDDFZE801/transit-documents", "ta_admin"
+        )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        self.assertEqual(len(resp.json()), 2)
+
     def test_rejection_keeps_letters_locked(self):
-        self._generate_letters()
         advance = self._request_advance().json()
         self._reject(advance["id"], {"remark": "not approved"})
+
+        resp = self._stage("transit_permit")
+        self.assertEqual(resp.status_code, 403)
 
         resp = self._get(
             "/api/inventory/purchases/MPDDFZE801/transit-documents", "ta_transitor"

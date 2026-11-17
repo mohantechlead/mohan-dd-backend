@@ -3181,12 +3181,7 @@ def update_purchase_stage(request, purchase_number: str, payload: PurchaseStageU
                 {"detail": "Transitors cannot set the stage to done or cancelled."},
                 status=403,
             )
-        allowed_next = {
-            None: "ecd_im8",
-            "ecd_im8": "transit_permit",
-            "transit_permit": "closure_guarantee",
-        }
-        next_stage = allowed_next.get(purchase.stage)
+        next_stage = _TRANSITOR_NEXT_STAGE.get(purchase.stage)
         if next_stage is None:
             return JsonResponse(
                 {
@@ -3200,6 +3195,18 @@ def update_purchase_stage(request, purchase_number: str, payload: PurchaseStageU
         if stage != next_stage:
             return JsonResponse(
                 {"detail": "Transitors can only advance the stage one step forward to '{0}'.".format(next_stage)},
+                status=403,
+            )
+        # The advance itself is what the admin approves: no move without it.
+        advance = _purchase_transit_advance(purchase)
+        if advance is None or advance.status != "approved" or advance.target_stage != next_stage:
+            return JsonResponse(
+                {
+                    "detail": (
+                        "Ask the admin to approve the advance to "
+                        f"{_purchase_stage_label(next_stage)} before moving this transit forward."
+                    )
+                },
                 status=403,
             )
 
@@ -3497,7 +3504,7 @@ def _transit_document_snapshot(purchase, bl, previous_letter=None) -> dict:
 
 
 def _allocate_transit_document_reference(document_date) -> str:
-    """Allocate the next MP/DD/<number>/<yy> reference for the year."""
+    """Allocate the next MPN/DDFT/<number>/<yy> reference for the year."""
     year = document_date.year
     while True:
         try:
@@ -3509,7 +3516,7 @@ def _allocate_transit_document_reference(document_date) -> str:
                 )
                 sequence.last_number += 1
                 sequence.save(update_fields=["last_number"])
-                reference = f"MP/DD/{sequence.last_number:03d}/{year % 100:02d}"
+                reference = f"MPN/DDFT/{sequence.last_number:03d}/{year % 100:02d}"
                 if not TransitDocument.objects.filter(
                     reference_number=reference
                 ).exists():
@@ -3630,9 +3637,12 @@ def _transit_advance_to_schema(advance: Optional[TransitAdvance]) -> Optional[Tr
     return TransitAdvanceSchema(
         id=str(advance.id),
         purchase_number=advance.purchase.purchase_number,
-        amount=float(advance.amount),
-        currency=advance.currency,
-        note=advance.note,
+        target_stage=advance.target_stage,
+        target_stage_label=(
+            _purchase_stage_label(advance.target_stage)
+            if advance.target_stage
+            else None
+        ),
         status=advance.status,
         status_label=advance.get_status_display(),
         requested_by=advance.requested_by.username if advance.requested_by else None,
@@ -3840,10 +3850,12 @@ def _advance_requester_allowed(request, purchase) -> bool:
 def request_transit_advance(
     request, purchase_number: str, payload: TransitAdvanceRequestSchema
 ):
-    """The assigned transitor requests (or updates) the advance for a transit.
+    """The assigned transitor asks to advance the purchase to its next stage.
 
-    While pending, the amount/note can be updated; after a rejection the
-    request goes back to pending. An approved advance is final.
+    There is nothing to fill in: the request simply names the next stage on
+    the transitor's path. While it is pending the transitor cannot move the
+    stage; after an approval the move (and the letters it produces) is
+    allowed. An approved request is final until the next stage is reached.
     """
     purchase = get_object_or_404(
         Purchase.objects.prefetch_related("items"),
@@ -3859,43 +3871,32 @@ def request_transit_advance(
             },
             status=403,
         )
-    amount = payload.amount
-    if amount is None or amount <= 0:
+    next_stage = _transitor_next_stage(purchase.stage)
+    if next_stage is None:
         return JsonResponse(
-            {"detail": "Advance amount must be greater than zero."}, status=400
-        )
-    currency = (payload.currency or "USD").strip().upper()
-    if currency not in _VALID_CURRENCIES:
-        return JsonResponse(
-            {"detail": f"Invalid currency. Allowed: {', '.join(_VALID_CURRENCIES)}."},
+            {"detail": "This transit has already reached its final stage."},
             status=400,
         )
-    note = (payload.note or "").strip() or None
 
     advance = _purchase_transit_advance(purchase)
-    if advance is not None and advance.status == "approved":
+    if advance is None:
+        advance = TransitAdvance(purchase=purchase)
+    elif advance.status == "approved" and advance.target_stage == next_stage:
         return JsonResponse(
             {"detail": "The advance for this transit has already been approved."},
             status=400,
         )
-    if advance is None:
-        advance = TransitAdvance.objects.create(
-            purchase=purchase,
-            amount=amount,
-            currency=currency,
-            note=note,
-            requested_by=getattr(request, "user", None),
-        )
     else:
-        advance.amount = amount
-        advance.currency = currency
-        advance.note = note
+        # Pending, rejected, or approved for an earlier stage -> a fresh ask.
         advance.status = "pending"
-        advance.requested_by = getattr(request, "user", None)
         advance.reviewed_by = None
         advance.reviewed_at = None
         advance.review_remark = None
-        advance.save()
+
+    advance.target_stage = next_stage
+    advance.requested_by = getattr(request, "user", None)
+    advance.requested_at = timezone.now()
+    advance.save()
     return _transit_advance_to_schema(advance)
 
 
@@ -4418,6 +4419,18 @@ _PURCHASE_STAGE_LABELS = {
     "cancelled": "Cancelled",
 }
 _PURCHASE_ALLOWED_STAGES = tuple(_PURCHASE_STAGE_LABELS.keys())
+
+# The forward-only path a transitor walks, one admin-approved step at a time.
+_TRANSITOR_NEXT_STAGE = {
+    None: "ecd_im8",
+    "ecd_im8": "transit_permit",
+    "transit_permit": "closure_guarantee",
+}
+
+
+def _transitor_next_stage(current_stage) -> Optional[str]:
+    """The stage a transitor may advance to from *current_stage*, or None."""
+    return _TRANSITOR_NEXT_STAGE.get(current_stage)
 
 
 def _purchase_stage_label(stage):
