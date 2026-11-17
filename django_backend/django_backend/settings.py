@@ -5,11 +5,6 @@ from datetime import timedelta
 import os
 import secrets
 
-try:
-    import django_heroku
-except ImportError:
-    django_heroku = None
-
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 # ==============================
@@ -204,7 +199,19 @@ _DATABASE_URL = (
     or "postgres://postgres:tsedi@localhost:5432/mohanPLC"
 )
 
-DATABASES = {"default": dj_database_url.parse(_DATABASE_URL, conn_max_age=0)}
+# Heroku Postgres requires TLS. A developer machine may also export a generic
+# DATABASE_URL, so only force SSL when LOCAL_DATABASE_URL is not pinning us to
+# the local server.
+_USING_LOCAL_DB = bool(os.environ.get("LOCAL_DATABASE_URL"))
+_DATABASE_SSL = not _USING_LOCAL_DB and bool(
+    os.environ.get("DATABASE_URL") or os.environ.get("DYNO")
+)
+
+DATABASES = {
+    "default": dj_database_url.parse(
+        _DATABASE_URL, conn_max_age=0, ssl_require=_DATABASE_SSL
+    )
+}
 
 # ==============================
 # Password validation
@@ -343,12 +350,8 @@ NINJA_JWT = {
 }
 
 # ==============================
-# Heroku (when deployed)
+# Reverse proxy / Heroku
 # ==============================
 
-if django_heroku:
-    django_heroku.settings(locals())
-    # django-heroku re-reads DATABASE_URL and would otherwise undo the
-    # LOCAL_DATABASE_URL choice above on developer machines.
-    if os.environ.get("LOCAL_DATABASE_URL"):
-        DATABASES["default"] = dj_database_url.parse(_DATABASE_URL, conn_max_age=0)
+# Heroku terminates TLS at the router and forwards the original scheme here.
+SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")

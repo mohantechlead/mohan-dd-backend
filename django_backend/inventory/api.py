@@ -2,15 +2,18 @@ import html
 import logging
 import math
 import re
+from concurrent.futures import ThreadPoolExecutor
 from decimal import Decimal
-from ninja import Router
+from ninja import Router, Schema
 from typing import List, Optional
 from datetime import date as date_type
 from datetime import datetime
 from datetime import timedelta
 from django.shortcuts import get_object_or_404
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.core.mail import send_mail
+from django.core.exceptions import ObjectDoesNotExist
 from django.conf import settings
 
 logger = logging.getLogger(__name__)
@@ -82,6 +85,11 @@ from .models import (
     ShippingInvoice,
     ShippingInvoiceItem,
     MarineInsurance,
+    BillOfLading,
+    BillOfLadingContainer,
+    DocumentReferenceSequence,
+    TransitDocument,
+    TransitAdvance,
     WarehouseStorageNote,
     WarehouseStorageItem,
     ExpirationFeeTier,
@@ -130,6 +138,16 @@ from .schemas import (
     MarineInsuranceCreateSchema,
     MarineInsuranceUpdateSchema,
     MarineInsuranceReminderSchema,
+    BillOfLadingSchema,
+    BillOfLadingCreateSchema,
+    BillOfLadingUpdateSchema,
+    BillOfLadingStatusUpdateSchema,
+    BillOfLadingContainerSchema,
+    TransitDocumentSchema,
+    TransitAdvanceSchema,
+    TransitAdvanceRequestSchema,
+    TransitAdvanceReviewSchema,
+    TransitAdvanceDetailSchema,
     ShippingInvoiceCreateSchema,
     ShippingInvoiceSummarySchema,
     ShippingInvoiceDetailSchema,
@@ -3270,7 +3288,13 @@ def list_missing_marine_insurance_purchases(request):
 def list_my_transits(request):
     purchases = (
         Purchase.objects.filter(assigned_transitor=request.user)
-        .prefetch_related("items")
+        .select_related("bill_of_lading")
+        .prefetch_related(
+            "items",
+            "bill_of_lading__containers",
+            "transit_documents",
+            "transit_advance",
+        )
         .order_by("-purchase_number")
     )
     return [_purchase_to_detail_schema(p, request) for p in purchases]
@@ -3316,12 +3340,7 @@ def update_purchase_stage(request, purchase_number: str, payload: PurchaseStageU
                 {"detail": "Transitors cannot set the stage to done or cancelled."},
                 status=403,
             )
-        allowed_next = {
-            None: "ecd_im8",
-            "ecd_im8": "transit_permit",
-            "transit_permit": "closure_guarantee",
-        }
-        next_stage = allowed_next.get(purchase.stage)
+        next_stage = _TRANSITOR_NEXT_STAGE.get(purchase.stage)
         if next_stage is None:
             return JsonResponse(
                 {
@@ -3337,11 +3356,38 @@ def update_purchase_stage(request, purchase_number: str, payload: PurchaseStageU
                 {"detail": "Transitors can only advance the stage one step forward to '{0}'.".format(next_stage)},
                 status=403,
             )
+        # The advance itself is what the admin approves: no move without it.
+        advance = _purchase_transit_advance(purchase)
+        if advance is None or advance.status != "approved" or advance.target_stage != next_stage:
+            return JsonResponse(
+                {
+                    "detail": (
+                        "Ask the admin to approve the advance to "
+                        f"{_purchase_stage_label(next_stage)} before moving this transit forward."
+                    )
+                },
+                status=403,
+            )
 
-    purchase.stage = stage
-    purchase.stage_updated_at = timezone.now()
-    purchase.stage_updated_by = user
-    purchase.save()
+    if stage in ("transit_permit", "closure_guarantee") and _purchase_bill_of_lading(
+        purchase
+    ) is None:
+        return JsonResponse(
+            {
+                "detail": (
+                    "Submit the bill of lading details before advancing to "
+                    f"{_purchase_stage_label(stage)}."
+                )
+            },
+            status=400,
+        )
+
+    with transaction.atomic():
+        purchase.stage = stage
+        purchase.stage_updated_at = timezone.now()
+        purchase.stage_updated_by = user
+        purchase.save()
+        _generate_transit_documents(purchase, stage)
 
     return _purchase_to_detail_schema(purchase, request)
 
@@ -3425,10 +3471,1074 @@ def update_purchase_marine_insurance(request, purchase_number: str, payload: Mar
     )
 
 
+# --- Bill of Lading (transit check) -------------------------------------------
+
+_BL_TRANSIT_STATUSES = tuple(value for value, _ in BillOfLading.TRANSIT_STATUS_CHOICES)
+_BL_TRANSIT_STATUS_LABELS = dict(BillOfLading.TRANSIT_STATUS_CHOICES)
+_BL_CONTAINER_SIZES = tuple(value for value, _ in BillOfLadingContainer.CONTAINER_SIZE_CHOICES)
+_BL_CARGO_TYPES = tuple(value for value, _ in BillOfLadingContainer.CARGO_TYPE_CHOICES)
+# Roles that manage transit/BL records on purchases.
+_BL_MANAGER_ROLES = ("admin", "logistics", "sales", "transitor")
+
+
+def _build_bl_tracking_url(bl: "BillOfLading") -> str | None:
+    """Carrier tracking URL for a BL.
+
+    If shipping_company_url contains the literal ``{bl}`` placeholder it is
+    replaced with the BL number (e.g. ``https://www.maersk.com/tracking/{bl}``).
+    When no URL is stored, fall back to the known carrier profile's template.
+    Otherwise the URL is returned as-is so the user can open the carrier's
+    tracking page and search the BL manually.
+    """
+    base = (bl.shipping_company_url or "").strip()
+    if not base:
+        from .carriers import resolve_carrier
+
+        profile = resolve_carrier(bl.shipping_company_name, None)
+        base = ((profile.url_template if profile else None) or "").strip()
+    if not base:
+        return None
+    if "{bl}" in base:
+        return base.replace("{bl}", bl.bl_number.strip())
+    return base
+
+
+def _bl_to_schema(bl: BillOfLading) -> BillOfLadingSchema:
+    return BillOfLadingSchema(
+        id=str(bl.id),
+        bl_number=bl.bl_number,
+        bl_date=bl.bl_date,
+        declaration_number=bl.declaration_number,
+        declaration_date=bl.declaration_date,
+        customs_value=float(bl.customs_value) if bl.customs_value is not None else None,
+        duty_value=float(bl.duty_value) if bl.duty_value is not None else None,
+        container_count=bl.container_count,
+        shipping_company_name=bl.shipping_company_name,
+        shipping_company_url=bl.shipping_company_url,
+        transit_status=bl.transit_status,
+        transit_status_label=_BL_TRANSIT_STATUS_LABELS.get(bl.transit_status),
+        tracking_url=_build_bl_tracking_url(bl),
+        status_detail=bl.status_detail,
+        status_checked_at=bl.status_checked_at.isoformat() if bl.status_checked_at else None,
+        vessel_name=bl.vessel_name,
+        vessel_imo=bl.vessel_imo,
+        vessel_mmsi=bl.vessel_mmsi,
+        ais_lat=bl.ais_lat,
+        ais_lng=bl.ais_lng,
+        ais_sog=bl.ais_sog,
+        ais_course=bl.ais_course,
+        ais_nav_status=bl.ais_nav_status,
+        ais_last_seen_at=bl.ais_last_seen_at.isoformat() if bl.ais_last_seen_at else None,
+        tracking_details=bl.tracking_details or {},
+        origin=(bl.tracking_details or {}).get("origin"),
+        destination=(bl.tracking_details or {}).get("destination"),
+        eta=(bl.tracking_details or {}).get("eta"),
+        last_event=(bl.tracking_details or {}).get("last_event"),
+        vessel_voyage=(bl.tracking_details or {}).get("vessel_voyage"),
+        last_updated=(bl.tracking_details or {}).get("last_updated"),
+        events=(bl.tracking_details or {}).get("events") or [],
+        containers=[
+            BillOfLadingContainerSchema(
+                id=str(c.id),
+                container_number=c.container_number,
+                size=c.size,
+                cargo_type=c.cargo_type,
+            )
+            for c in bl.containers.all().order_by("created_at", "container_number")
+        ],
+        created_at=bl.created_at,
+        updated_at=bl.updated_at,
+    )
+
+
+def _validate_bl_payload(payload) -> str | None:
+    """Return an error message if the BL payload is invalid, else None."""
+    if payload.container_count < 0:
+        return "container_count must be zero or greater."
+    if len(payload.containers) != payload.container_count:
+        return (
+            f"Expected {payload.container_count} container(s), "
+            f"received {len(payload.containers)}."
+        )
+    for c in payload.containers:
+        if c.size not in _BL_CONTAINER_SIZES:
+            return f"Invalid container size '{c.size}'. Allowed: {', '.join(_BL_CONTAINER_SIZES)}."
+        if c.cargo_type not in _BL_CARGO_TYPES:
+            return (
+                f"Invalid cargo type '{c.cargo_type}'. "
+                f"Allowed: {', '.join(_BL_CARGO_TYPES)}."
+            )
+        if not c.container_number.strip():
+            return "Container number is required for every container."
+    return None
+
+
+def _replace_bl_containers(bl: BillOfLading, containers) -> None:
+    bl.containers.all().delete()
+    for c in containers:
+        BillOfLadingContainer.objects.create(
+            bill_of_lading=bl,
+            container_number=c.container_number.strip(),
+            size=c.size,
+            cargo_type=c.cargo_type,
+        )
+
+
+_TRANSIT_DOCUMENT_LABELS = dict(TransitDocument.DOCUMENT_TYPE_CHOICES)
+
+
+def _purchase_bill_of_lading(purchase):
+    """Return the purchase's BL or None without raising DoesNotExist."""
+    try:
+        return purchase.bill_of_lading
+    except BillOfLading.DoesNotExist:
+        return None
+
+
+def _container_size_summary(containers) -> str:
+    """'8 x 40'' or '2 x 20' & 1 x 40'' for the guarantee subject line."""
+    counts = {}
+    order = []
+    for container in containers:
+        size = (container.size or "").strip()
+        if not size:
+            continue
+        if size not in counts:
+            counts[size] = 0
+            order.append(size)
+        counts[size] += 1
+    if not order:
+        return "0 x 40'"
+    return " & ".join(f"{counts[size]} x {size}'" for size in order)
+
+
+def _transit_document_snapshot(purchase, bl, previous_letter=None) -> dict:
+    """Freeze the values printed on a guarantee letter."""
+    containers = list(
+        bl.containers.all().order_by("created_at", "container_number")
+    )
+    declaration_number = (
+        (bl.declaration_number or "").strip()
+        or (purchase.proforma_ref_no or "").strip()
+        or purchase.purchase_number
+    )
+    declaration_date = bl.declaration_date or purchase.order_date
+    customs_value = (
+        bl.customs_value if bl.customs_value is not None else purchase.before_vat
+    )
+    snapshot = {
+        "purchase_number": purchase.purchase_number,
+        "buyer": purchase.buyer,
+        "shipper": purchase.shipper,
+        "proforma_ref_no": purchase.proforma_ref_no,
+        "bl_number": bl.bl_number,
+        "bl_date": bl.bl_date.isoformat(),
+        "shipping_company_name": bl.shipping_company_name,
+        "vessel_name": bl.vessel_name,
+        "container_count": bl.container_count,
+        "container_size_summary": _container_size_summary(containers),
+        "containers": [
+            {
+                "container_number": container.container_number,
+                "size": container.size,
+                "cargo_type": container.cargo_type,
+            }
+            for container in containers
+        ],
+        "port_of_loading": purchase.port_of_loading,
+        "port_of_discharge": purchase.port_of_discharge,
+        "final_destination": purchase.final_destination,
+        "declaration_number": declaration_number,
+        "declaration_date": declaration_date.isoformat() if declaration_date else None,
+        "customs_value": (
+            float(customs_value) if customs_value is not None else None
+        ),
+        "duty_value": float(bl.duty_value) if bl.duty_value is not None else None,
+        "return_days": 90,
+    }
+    if previous_letter is not None:
+        snapshot["previous_letter_reference"] = previous_letter.reference_number
+        snapshot["previous_letter_date"] = previous_letter.document_date.isoformat()
+    return snapshot
+
+
+def _allocate_transit_document_reference(document_date) -> str:
+    """Allocate the next MPN/DDFT/<number>/<yy> reference for the year."""
+    year = document_date.year
+    while True:
+        try:
+            with transaction.atomic():
+                sequence, _ = (
+                    DocumentReferenceSequence.objects.select_for_update().get_or_create(
+                        year=year
+                    )
+                )
+                sequence.last_number += 1
+                sequence.save(update_fields=["last_number"])
+                reference = f"MPN/DDFT/{sequence.last_number:03d}/{year % 100:02d}"
+                if not TransitDocument.objects.filter(
+                    reference_number=reference
+                ).exists():
+                    return reference
+        except IntegrityError:
+            # Another request created the year row/reference first; retry.
+            continue
+
+
+def _ensure_transit_document(
+    purchase, bl, document_type: str, previous_letter=None
+) -> TransitDocument:
+    existing = TransitDocument.objects.filter(
+        purchase=purchase, document_type=document_type
+    ).first()
+    if existing is not None:
+        return existing
+
+    document_date = timezone.localdate()
+    snapshot = _transit_document_snapshot(purchase, bl, previous_letter)
+    for _ in range(5):
+        try:
+            with transaction.atomic():
+                existing = TransitDocument.objects.filter(
+                    purchase=purchase, document_type=document_type
+                ).first()
+                if existing is not None:
+                    return existing
+                return TransitDocument.objects.create(
+                    purchase=purchase,
+                    document_type=document_type,
+                    reference_number=_allocate_transit_document_reference(
+                        document_date
+                    ),
+                    document_date=document_date,
+                    snapshot=snapshot,
+                )
+        except IntegrityError:
+            existing = TransitDocument.objects.filter(
+                purchase=purchase, document_type=document_type
+            ).first()
+            if existing is not None:
+                return existing
+    raise IntegrityError("Could not allocate a transit document reference.")
+
+
+def _generate_transit_documents(purchase, target_stage: str) -> list:
+    """Create the letters required when entering *target_stage*.
+
+    Advancing to Transit Permit produces the Container Guarantee and the
+    Letter of Guarantee. Advancing to Closure Guarantee produces the closure
+    letter, which references the Letter of Guarantee created earlier.
+    """
+    bl = _purchase_bill_of_lading(purchase)
+    if bl is None:
+        return []
+
+    container_guarantee = None
+    letter_guarantee = None
+    if target_stage in ("transit_permit", "closure_guarantee"):
+        container_guarantee = _ensure_transit_document(
+            purchase, bl, "container_guarantee"
+        )
+        letter_guarantee = _ensure_transit_document(
+            purchase, bl, "letter_guarantee"
+        )
+    if target_stage == "closure_guarantee":
+        _ensure_transit_document(
+            purchase, bl, "closure_guarantee", previous_letter=letter_guarantee
+        )
+    return [
+        document
+        for document in (
+            container_guarantee,
+            letter_guarantee,
+        )
+        if document is not None
+    ]
+
+
+def _transit_document_to_schema(document: TransitDocument) -> TransitDocumentSchema:
+    return TransitDocumentSchema(
+        id=str(document.id),
+        document_type=document.document_type,
+        document_type_label=_TRANSIT_DOCUMENT_LABELS.get(document.document_type),
+        reference_number=document.reference_number,
+        document_date=document.document_date,
+        snapshot=document.snapshot or {},
+        created_at=document.created_at,
+    )
+
+
+def _purchase_transit_advance(purchase) -> Optional[TransitAdvance]:
+    """Return the transit advance linked to a purchase, or None. Never raises."""
+    try:
+        return purchase.transit_advance
+    except ObjectDoesNotExist:
+        return None
+
+
+def _transit_documents_locked_for(user, purchase) -> bool:
+    """Transitors may only print transit letters after the admin approved the advance.
+
+    Admins and the other office roles always see the letters; a transitor needs
+    an approved ``TransitAdvance`` for the purchase.
+    """
+    if user is None or not getattr(user, "is_authenticated", False):
+        return False
+    if getattr(user, "role", None) != "transitor":
+        return False
+    advance = _purchase_transit_advance(purchase)
+    return not (advance is not None and advance.status == "approved")
+
+
+def _transit_advance_to_schema(advance: Optional[TransitAdvance]) -> Optional[TransitAdvanceSchema]:
+    if advance is None:
+        return None
+    return TransitAdvanceSchema(
+        id=str(advance.id),
+        purchase_number=advance.purchase.purchase_number,
+        target_stage=advance.target_stage,
+        target_stage_label=(
+            _purchase_stage_label(advance.target_stage)
+            if advance.target_stage
+            else None
+        ),
+        status=advance.status,
+        status_label=advance.get_status_display(),
+        requested_by=advance.requested_by.username if advance.requested_by else None,
+        requested_at=advance.requested_at.isoformat() if advance.requested_at else None,
+        reviewed_by=advance.reviewed_by.username if advance.reviewed_by else None,
+        reviewed_at=advance.reviewed_at.isoformat() if advance.reviewed_at else None,
+        review_remark=advance.review_remark,
+    )
+
+
+def _transit_advance_detail_to_schema(advance: TransitAdvance, request) -> TransitAdvanceDetailSchema:
+    """Advance + full purchase detail (what the admin sees on review)."""
+    return TransitAdvanceDetailSchema(
+        advance=_transit_advance_to_schema(advance),
+        purchase=_purchase_to_detail_schema(advance.purchase, request),
+    )
+
+
+@router.get(
+    "/purchases/{purchase_number}/bl",
+    response=BillOfLadingSchema,
+    auth=JWTAuth(),
+)
+def get_purchase_bill_of_lading(request, purchase_number: str):
+    purchase = get_object_or_404(Purchase, purchase_number__iexact=purchase_number.strip())
+    bl = get_object_or_404(
+        BillOfLading.objects.prefetch_related("containers"), purchase=purchase
+    )
+    return _bl_to_schema(bl)
+
+
+@router.post(
+    "/purchases/{purchase_number}/bl",
+    response=BillOfLadingSchema,
+    auth=JWTAuth(),
+)
+def create_purchase_bill_of_lading(request, purchase_number: str, payload: BillOfLadingCreateSchema):
+    err = _require_roles(request, *_BL_MANAGER_ROLES)
+    if err:
+        return err
+    purchase = get_object_or_404(Purchase, purchase_number__iexact=purchase_number.strip())
+    if BillOfLading.objects.filter(purchase=purchase).exists():
+        return JsonResponse(
+            {"detail": "A bill of lading already exists for this purchase."}, status=400
+        )
+    validation_error = _validate_bl_payload(payload)
+    if validation_error:
+        return JsonResponse({"detail": validation_error}, status=400)
+
+    bl = BillOfLading.objects.create(
+        purchase=purchase,
+        bl_number=payload.bl_number.strip(),
+        bl_date=payload.bl_date,
+        declaration_number=(payload.declaration_number or "").strip() or None,
+        declaration_date=payload.declaration_date,
+        customs_value=payload.customs_value,
+        duty_value=payload.duty_value,
+        container_count=payload.container_count,
+        shipping_company_name=(payload.shipping_company_name or "").strip() or None,
+        shipping_company_url=(payload.shipping_company_url or "").strip() or None,
+        vessel_name=(payload.vessel_name or "").strip() or None,
+        vessel_imo=(payload.vessel_imo or "").strip() or None,
+        vessel_mmsi=(payload.vessel_mmsi or "").strip() or None,
+    )
+    _replace_bl_containers(bl, payload.containers)
+    bl.refresh_from_db()
+    return _bl_to_schema(bl)
+
+
+@router.put(
+    "/purchases/{purchase_number}/bl",
+    response=BillOfLadingSchema,
+    auth=JWTAuth(),
+)
+def update_purchase_bill_of_lading(request, purchase_number: str, payload: BillOfLadingUpdateSchema):
+    err = _require_roles(request, *_BL_MANAGER_ROLES)
+    if err:
+        return err
+    purchase = get_object_or_404(Purchase, purchase_number__iexact=purchase_number.strip())
+    bl = get_object_or_404(BillOfLading, purchase=purchase)
+    validation_error = _validate_bl_payload(payload)
+    if validation_error:
+        return JsonResponse({"detail": validation_error}, status=400)
+
+    bl.bl_number = payload.bl_number.strip()
+    bl.bl_date = payload.bl_date
+    bl.declaration_number = (payload.declaration_number or "").strip() or None
+    bl.declaration_date = payload.declaration_date
+    bl.customs_value = payload.customs_value
+    bl.duty_value = payload.duty_value
+    bl.container_count = payload.container_count
+    bl.shipping_company_name = (payload.shipping_company_name or "").strip() or None
+    bl.shipping_company_url = (payload.shipping_company_url or "").strip() or None
+    bl.vessel_name = (payload.vessel_name or "").strip() or None
+    bl.vessel_imo = (payload.vessel_imo or "").strip() or None
+    bl.vessel_mmsi = (payload.vessel_mmsi or "").strip() or None
+    bl.save()
+    _replace_bl_containers(bl, payload.containers)
+    bl.refresh_from_db()
+    return _bl_to_schema(bl)
+
+
+@router.delete("/purchases/{purchase_number}/bl", auth=JWTAuth())
+def delete_purchase_bill_of_lading(request, purchase_number: str):
+    err = _require_roles(request, *_BL_MANAGER_ROLES)
+    if err:
+        return err
+    purchase = get_object_or_404(Purchase, purchase_number__iexact=purchase_number.strip())
+    bl = get_object_or_404(BillOfLading, purchase=purchase)
+    bl.delete()
+    return JsonResponse({"detail": "Bill of lading deleted."})
+
+
+@router.post(
+    "/purchases/{purchase_number}/bl/status",
+    response=BillOfLadingSchema,
+    auth=JWTAuth(),
+)
+def update_purchase_bl_transit_status(
+    request, purchase_number: str, payload: BillOfLadingStatusUpdateSchema
+):
+    """Record the transit status observed on the carrier's tracking page.
+
+    Free carrier pages cannot be scraped reliably, so the status is stored when
+    the user checks it (manually or after opening the tracking link). A paid
+    tracking API (Terminal49 / ShipsGo / SeaVantage) can replace this later.
+    """
+    err = _require_roles(request, *_BL_MANAGER_ROLES)
+    if err:
+        return err
+    if payload.transit_status not in _BL_TRANSIT_STATUSES:
+        return JsonResponse(
+            {"detail": f"Invalid transit status. Allowed: {', '.join(_BL_TRANSIT_STATUSES)}."},
+            status=400,
+        )
+    purchase = get_object_or_404(Purchase, purchase_number__iexact=purchase_number.strip())
+    bl = get_object_or_404(BillOfLading.objects.prefetch_related("containers"), purchase=purchase)
+    bl.transit_status = payload.transit_status
+    bl.status_detail = (payload.status_detail or "").strip() or None
+    bl.status_checked_at = timezone.now()
+    bl.save()
+    return _bl_to_schema(bl)
+
+
+@router.get(
+    "/purchases/{purchase_number}/bl/track",
+    response=BillOfLadingSchema,
+    auth=JWTAuth(),
+)
+def get_purchase_bl_tracking(request, purchase_number: str):
+    """Return the BL with a built tracking_url for opening the carrier page."""
+    purchase = get_object_or_404(Purchase, purchase_number__iexact=purchase_number.strip())
+    bl = get_object_or_404(
+        BillOfLading.objects.prefetch_related("containers"), purchase=purchase
+    )
+    return _bl_to_schema(bl)
+
+
+@router.get(
+    "/purchases/{purchase_number}/transit-documents",
+    response=List[TransitDocumentSchema],
+    auth=JWTAuth(),
+)
+def list_purchase_transit_documents(request, purchase_number: str):
+    purchase = get_object_or_404(
+        Purchase.objects.prefetch_related("transit_documents"),
+        purchase_number__iexact=purchase_number.strip(),
+    )
+    if _transit_documents_locked_for(getattr(request, "user", None), purchase):
+        return JsonResponse(
+            {
+                "detail": (
+                    "Transit letters are locked until an admin approves "
+                    "this transit's advance."
+                )
+            },
+            status=403,
+        )
+    return [
+        _transit_document_to_schema(document)
+        for document in purchase.transit_documents.all()
+    ]
+
+
+# ============================================================
+# Transit advance (requested by the transitor, approved by admin)
+# ============================================================
+
+def _advance_requester_allowed(request, purchase) -> bool:
+    """Only the assigned transitor (or an admin) may request/view the advance."""
+    user = getattr(request, "user", None)
+    if user is None or not user.is_authenticated:
+        return False
+    role = getattr(user, "role", "logistics")
+    if role == "admin" or getattr(user, "is_superuser", False):
+        return True
+    return role == "transitor" and purchase.assigned_transitor_id == user.id
+
+
+@router.post(
+    "/purchases/{purchase_number}/advance",
+    response=TransitAdvanceSchema,
+    auth=JWTAuth(),
+)
+def request_transit_advance(
+    request, purchase_number: str, payload: TransitAdvanceRequestSchema
+):
+    """The assigned transitor asks to advance the purchase to its next stage.
+
+    There is nothing to fill in: the request simply names the next stage on
+    the transitor's path. While it is pending the transitor cannot move the
+    stage; after an approval the move (and the letters it produces) is
+    allowed. An approved request is final until the next stage is reached.
+    """
+    purchase = get_object_or_404(
+        Purchase.objects.prefetch_related("items"),
+        purchase_number__iexact=purchase_number.strip(),
+    )
+    if not _advance_requester_allowed(request, purchase):
+        return JsonResponse(
+            {
+                "detail": (
+                    "Only the assigned transitor or an admin can manage "
+                    "the transit advance."
+                )
+            },
+            status=403,
+        )
+    next_stage = _transitor_next_stage(purchase.stage)
+    if next_stage is None:
+        return JsonResponse(
+            {"detail": "This transit has already reached its final stage."},
+            status=400,
+        )
+
+    advance = _purchase_transit_advance(purchase)
+    if advance is None:
+        advance = TransitAdvance(purchase=purchase)
+    elif advance.status == "approved" and advance.target_stage == next_stage:
+        return JsonResponse(
+            {"detail": "The advance for this transit has already been approved."},
+            status=400,
+        )
+    else:
+        # Pending, rejected, or approved for an earlier stage -> a fresh ask.
+        advance.status = "pending"
+        advance.reviewed_by = None
+        advance.reviewed_at = None
+        advance.review_remark = None
+
+    advance.target_stage = next_stage
+    advance.requested_by = getattr(request, "user", None)
+    advance.requested_at = timezone.now()
+    advance.save()
+    return _transit_advance_to_schema(advance)
+
+
+@router.get(
+    "/purchases/{purchase_number}/advance",
+    response=Optional[TransitAdvanceSchema],
+    auth=JWTAuth(),
+)
+def get_purchase_transit_advance(request, purchase_number: str):
+    """View the advance for a transit (assigned transitor or admin)."""
+    purchase = get_object_or_404(Purchase, purchase_number__iexact=purchase_number.strip())
+    if not _advance_requester_allowed(request, purchase):
+        return JsonResponse(
+            {"detail": "Not permitted."},
+            status=403,
+        )
+    return _transit_advance_to_schema(_purchase_transit_advance(purchase))
+
+
+@router.get(
+    "/transit-advances",
+    response=List[TransitAdvanceDetailSchema],
+    auth=JWTAuth(),
+)
+def list_transit_advances(request, status: str = "pending"):
+    """Admin inbox: every transit advance with its purchase detail."""
+    err = _require_admin(request)
+    if err:
+        return err
+    qs = TransitAdvance.objects.select_related(
+        "purchase",
+        "purchase__assigned_transitor",
+        "purchase__bill_of_lading",
+        "requested_by",
+        "reviewed_by",
+    ).prefetch_related(
+        "purchase__items",
+        "purchase__transit_documents",
+        "purchase__bill_of_lading__containers",
+    )
+    if status and status != "all":
+        qs = qs.filter(status=status)
+    return [_transit_advance_detail_to_schema(advance, request) for advance in qs]
+
+
+@router.post(
+    "/transit-advances/{advance_id}/approve",
+    response=TransitAdvanceDetailSchema,
+    auth=JWTAuth(),
+)
+def approve_transit_advance(request, advance_id: uuid.UUID):
+    """Approve a pending advance; returns the advance + purchase detail."""
+    err = _require_admin(request)
+    if err:
+        return err
+    advance = get_object_or_404(
+        TransitAdvance.objects.select_related(
+            "purchase", "requested_by", "reviewed_by"
+        ),
+        id=advance_id,
+    )
+    if advance.status != "pending":
+        return JsonResponse(
+            {"detail": "This advance has already been reviewed."}, status=400
+        )
+    advance.status = "approved"
+    advance.reviewed_by = request.user
+    advance.reviewed_at = timezone.now()
+    advance.review_remark = None
+    advance.save()
+    return _transit_advance_detail_to_schema(advance, request)
+
+
+@router.post(
+    "/transit-advances/{advance_id}/reject",
+    response=TransitAdvanceDetailSchema,
+    auth=JWTAuth(),
+)
+def reject_transit_advance(
+    request, advance_id: uuid.UUID, payload: TransitAdvanceReviewSchema
+):
+    """Reject a pending advance (optional remark); returns advance + purchase."""
+    err = _require_admin(request)
+    if err:
+        return err
+    advance = get_object_or_404(
+        TransitAdvance.objects.select_related(
+            "purchase", "requested_by", "reviewed_by"
+        ),
+        id=advance_id,
+    )
+    if advance.status != "pending":
+        return JsonResponse(
+            {"detail": "This advance has already been reviewed."}, status=400
+        )
+    advance.status = "rejected"
+    advance.reviewed_by = request.user
+    advance.reviewed_at = timezone.now()
+    advance.review_remark = (payload.remark or "").strip() or None
+    advance.save()
+    return _transit_advance_detail_to_schema(advance, request)
+
+
+class BillOfLadingCheckStatusResponse(Schema):
+    transit_status: str
+    transit_status_label: Optional[str] = None
+    status_detail: Optional[str] = None
+    status_checked_at: Optional[str] = None
+    tracking_url: Optional[str] = None
+    scrape_source: Optional[str] = None
+    scrape_error: Optional[str] = None
+    vessel_name: Optional[str] = None
+    vessel_imo: Optional[str] = None
+    vessel_mmsi: Optional[str] = None
+    ais_lat: Optional[float] = None
+    ais_lng: Optional[float] = None
+    ais_sog: Optional[float] = None
+    ais_course: Optional[float] = None
+    ais_nav_status: Optional[str] = None
+    ais_last_seen_at: Optional[str] = None
+    tracking_details: dict = {}
+    origin: Optional[str] = None
+    destination: Optional[str] = None
+    eta: Optional[str] = None
+    last_event: Optional[str] = None
+    vessel_voyage: Optional[str] = None
+    last_updated: Optional[str] = None
+    events: list[dict] = []
+
+
+def _bl_check_status_response(bl: BillOfLading, **overrides) -> BillOfLadingCheckStatusResponse:
+    details = bl.tracking_details or {}
+    payload = {
+        "transit_status": bl.transit_status,
+        "transit_status_label": _BL_TRANSIT_STATUS_LABELS.get(bl.transit_status),
+        "status_detail": bl.status_detail,
+        "status_checked_at": bl.status_checked_at.isoformat() if bl.status_checked_at else None,
+        "tracking_url": _build_bl_tracking_url(bl),
+        "scrape_source": None,
+        "scrape_error": None,
+        "vessel_name": bl.vessel_name,
+        "vessel_imo": bl.vessel_imo,
+        "vessel_mmsi": bl.vessel_mmsi,
+        "ais_lat": bl.ais_lat,
+        "ais_lng": bl.ais_lng,
+        "ais_sog": bl.ais_sog,
+        "ais_course": bl.ais_course,
+        "ais_nav_status": bl.ais_nav_status,
+        "ais_last_seen_at": bl.ais_last_seen_at.isoformat() if bl.ais_last_seen_at else None,
+        "tracking_details": details,
+        "origin": details.get("origin"),
+        "destination": details.get("destination"),
+        "eta": details.get("eta"),
+        "last_event": details.get("last_event"),
+        "vessel_voyage": details.get("vessel_voyage"),
+        "last_updated": details.get("last_updated"),
+        "events": details.get("events") or [],
+    }
+    payload.update(overrides)
+    return BillOfLadingCheckStatusResponse(**payload)
+
+
+# AIS lookup is network-bound and independent of the carrier scrape. A small
+# shared pool lets check-status do both at the same time, which keeps the
+# request inside Heroku's ~30 s router timeout even with a 20 s AIS window.
+_AIS_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="ais-lookup")
+
+
+def _lookup_ais_position(mmsi: str, vessel_name: str):
+    """Network-only AIS lookup (no ORM access) safe to run in a worker thread."""
+    mmsi = (mmsi or "").strip()
+    vessel_name = (vessel_name or "").strip()
+    if not mmsi and not vessel_name:
+        return None
+    try:
+        from .ais_stream import fetch_position
+    except Exception:
+        return None
+    position = fetch_position(mmsi=mmsi, vessel_name=vessel_name)
+    if position is None and mmsi and vessel_name:
+        # Stale/wrong MMSI on file: retry with the name the operator entered.
+        position = fetch_position(vessel_name=vessel_name)
+    return position
+
+
+def _start_ais_lookup(bl: BillOfLading):
+    """Submit an AIS lookup early so it overlaps with the carrier scrape."""
+    mmsi = (bl.vessel_mmsi or "").strip()
+    vessel_name = (bl.vessel_name or "").strip()
+    if not mmsi and not vessel_name:
+        return None
+    try:
+        return _AIS_EXECUTOR.submit(_lookup_ais_position, mmsi, vessel_name)
+    except Exception:
+        return None
+
+
+def _apply_ais_position(bl: BillOfLading, position) -> None:
+    """Persist an AIS fix on the BL (call from the request thread)."""
+    if position is None:
+        return
+    bl.ais_lat = position.lat
+    bl.ais_lng = position.lng
+    bl.ais_sog = position.sog
+    bl.ais_course = position.cog
+    bl.ais_nav_status = position.nav_status
+    bl.ais_last_seen_at = position.last_seen_at
+    # Soft override: AIS can only nudge an already-moving shipment to in_transit.
+    if position.sog is not None and position.sog > 0.5 and bl.transit_status in {
+        "pending",
+        "in_transit",
+    }:
+        if bl.transit_status != "in_transit":
+            bl.transit_status = "in_transit"
+    bl.save(
+        update_fields=[
+            "ais_lat",
+            "ais_lng",
+            "ais_sog",
+            "ais_course",
+            "ais_nav_status",
+            "ais_last_seen_at",
+            "transit_status",
+            "updated_at",
+        ]
+    )
+
+
+def _collect_ais_lookup(bl: BillOfLading, future) -> None:
+    """Wait for an early AIS lookup and persist it, soft-failing on errors."""
+    if future is None:
+        return
+    try:
+        position = future.result()
+    except Exception:
+        return
+    _apply_ais_position(bl, position)
+
+
+def _apply_ais_enrichment(bl: BillOfLading) -> None:
+    """Synchronous AIS lookup + save (kept for callers outside check-status)."""
+    _collect_ais_lookup(bl, _start_ais_lookup(bl))
+
+
+@router.post(
+    "/purchases/{purchase_number}/bl/check-status",
+    response=BillOfLadingCheckStatusResponse,
+    auth=JWTAuth(),
+)
+def check_purchase_bl_status(request, purchase_number: str):
+    """Scrape the carrier tracking page and update the BL transit status.
+
+    Strategy (best-effort, no carrier accounts):
+    1. Hard-carrier adapter (curl_cffi) when the shipping line is known —
+       currently MSC via their public tracking JSON API.
+    2. Plain HTTP scrape of shipping_company_url (SSR carriers like PIL).
+    3. Browser fallback inside transit_scraper for local environments.
+    4. AIS position enrichment using the vessel MMSI or vessel name.
+    On failure the previous status is kept and scrape_error explains why.
+    """
+    err = _require_roles(request, *_BL_MANAGER_ROLES)
+    if err:
+        return err
+    purchase = get_object_or_404(Purchase, purchase_number__iexact=purchase_number.strip())
+    bl = get_object_or_404(BillOfLading.objects.prefetch_related("containers"), purchase=purchase)
+
+    # Start AIS now: it runs while the carrier page is being fetched, so the
+    # endpoint is bounded by the slower of the two instead of their sum.
+    ais_future = _start_ais_lookup(bl)
+
+    from .carriers import resolve_carrier
+    from .transit_scraper import build_tracking_url, scrape_transit_status
+
+    carrier = resolve_carrier(bl.shipping_company_name, bl.shipping_company_url)
+    reference = (bl.bl_number or "").strip()
+    # Maersk and ESL accept a BL number and return the whole shipment; MSC keys
+    # off container numbers, so prefer the first container there.
+    first_container = bl.containers.first()
+    container_ref = first_container.container_number if first_container else ""
+    hard_ref = container_ref or reference
+    if not carrier or carrier.hard_adapter in {"maersk", "esl"}:
+        hard_ref = reference or container_ref
+
+    result = None
+    if carrier and carrier.hard_adapter:
+        try:
+            from .hard_carriers import try_hard_carrier
+        except Exception:
+            try_hard_carrier = None
+        if try_hard_carrier is not None:
+            result = try_hard_carrier(carrier.hard_adapter, hard_ref)
+            if (
+                result is not None
+                and result.transit_status is None
+                and result.error
+                and "not find" in (result.error or "").lower()
+                and reference
+                and reference != hard_ref
+            ):
+                result = try_hard_carrier(carrier.hard_adapter, reference)
+
+    # Fall back to the known carrier template when the BL has no stored URL.
+    url_template = (bl.shipping_company_url or "").strip()
+    if not url_template and carrier:
+        url_template = (carrier.url_template or "").strip()
+    url = build_tracking_url(url_template, reference)
+    if result is None or result.transit_status is None:
+        if not url:
+            if result is None:
+                # No carrier tracking page to scrape; AIS alone can still put
+                # the ship on the map when only a vessel name was entered.
+                _collect_ais_lookup(bl, ais_future)
+                try:
+                    bl.refresh_from_db()
+                except Exception:
+                    pass
+                has_position = bl.ais_lat is not None and bl.ais_lng is not None
+                return _bl_check_status_response(
+                    bl,
+                    tracking_url=None,
+                    scrape_error=(
+                        None
+                        if has_position
+                        else (
+                            "No shipping company tracking URL set on this BL "
+                            "and no AIS position found for this vessel."
+                        )
+                    ),
+                )
+        else:
+            result = scrape_transit_status(url_template, bl_number=reference)
+            # If the page did not map a status, try remaining container numbers
+            # as the tracking reference (many carrier UIs key off containers).
+            if result.transit_status is None:
+                for container in bl.containers.all():
+                    ref = (container.container_number or "").strip()
+                    if not ref or ref == reference:
+                        continue
+                    alt = scrape_transit_status(url_template, bl_number=ref)
+                    if alt.transit_status:
+                        result = alt
+                        break
+
+    details = {}
+    if hasattr(result, "detail_payload"):
+        details = result.detail_payload() or {}
+    else:
+        details = getattr(result, "details", None) or {}
+
+    # Older checks stored nav copy as a vessel name ("mentTrack Shipment Now").
+    from .tracking_details import looks_like_vessel, sanitize_details
+
+    details = sanitize_details(details)
+    cleared_vessel = False
+    if (bl.vessel_name or "").strip() and not looks_like_vessel(bl.vessel_name):
+        bl.vessel_name = None
+        cleared_vessel = True
+
+    # A definitive "this site has no such shipment" must not leave an older,
+    # possibly wrong scrape on screen (placeholder references used to inherit
+    # whatever the previous check found).
+    reference_missing = bool(result.error) and (
+        "was not found on the tracking page" in result.error
+    )
+    if reference_missing:
+        bl.transit_status = "pending"
+        bl.status_detail = None
+        bl.tracking_details = {}
+        bl.vessel_name = None
+        details = {}
+        cleared_vessel = True
+
+    if details:
+        bl.tracking_details = details
+        # If the extractor found a vessel, keep the BL in sync.
+        if not (bl.vessel_name or "").strip() and details.get("vessel_name"):
+            bl.vessel_name = details["vessel_name"]
+
+    # Carrier data is authoritative for container numbers: fill them in when the
+    # BL has none yet (never delete what an operator entered).
+    carrier_boxes = [
+        c
+        for c in details.get("containers") or []
+        if isinstance(c, dict) and c.get("container_number")
+    ]
+    if carrier_boxes:
+        try:
+            has_boxes = bl.containers.exists()
+        except Exception:
+            has_boxes = True
+        if not has_boxes:
+            for box in carrier_boxes:
+                size = str(box.get("size") or "40").strip()
+                if size not in _BL_CONTAINER_SIZES:
+                    size = "40"
+                BillOfLadingContainer.objects.create(
+                    bill_of_lading=bl,
+                    container_number=str(box["container_number"]).strip()[:20],
+                    size=size,
+                    cargo_type="non_hazardous",
+                )
+            bl.container_count = len(carrier_boxes)
+            bl.save(update_fields=["container_count"])
+
+    if result.transit_status:
+        bl.transit_status = result.transit_status
+        bl.status_checked_at = timezone.now()
+    # Replace the status detail whenever the carrier gave us something better
+    # (this is what clears stale page-chrome text from older checks).
+    if result.status_detail:
+        bl.status_detail = result.status_detail
+
+    update_fields = []
+    if reference_missing:
+        update_fields += [
+            "transit_status",
+            "status_checked_at",
+            "status_detail",
+            "tracking_details",
+            "vessel_name",
+        ]
+    if result.transit_status:
+        update_fields += ["transit_status", "status_checked_at"]
+    if result.status_detail:
+        update_fields.append("status_detail")
+    if details:
+        update_fields.append("tracking_details")
+    if cleared_vessel:
+        update_fields.append("vessel_name")
+    if details.get("vessel_name"):
+        update_fields.append("vessel_name")
+    update_fields = list(dict.fromkeys(update_fields))
+    if update_fields:
+        update_fields.append("updated_at")
+        bl.save(update_fields=update_fields)
+
+    try:
+        _collect_ais_lookup(bl, ais_future)
+        bl.refresh_from_db(
+            fields=[
+                "transit_status",
+                "status_detail",
+                "status_checked_at",
+                "vessel_name",
+                "vessel_imo",
+                "vessel_mmsi",
+                "ais_lat",
+                "ais_lng",
+                "ais_sog",
+                "ais_course",
+                "ais_nav_status",
+                "ais_last_seen_at",
+                "tracking_details",
+            ]
+        )
+    except Exception:
+        bl.refresh_from_db()
+
+    scrape_error = result.error
+    if details and not result.transit_status and scrape_error:
+        # We did read real carrier data; the status just wasn't recognizable.
+        scrape_error = (
+            "Tracking details were read from the carrier, but the transit status "
+            "could not be determined automatically. Review the details or set it manually."
+        )
+
+    return _bl_check_status_response(
+        bl,
+        tracking_url=url or _build_bl_tracking_url(bl),
+        scrape_source=result.source,
+        scrape_error=scrape_error,
+    )
+
+
 @router.get("/purchases/{purchase_number}", response=PurchaseDetailSchema, auth=JWTAuth())
 def get_purchase_detail(request, purchase_number: str):
     purchase = get_object_or_404(
-        Purchase.objects.prefetch_related("items"),
+        Purchase.objects.select_related("bill_of_lading").prefetch_related(
+            "items",
+            "bill_of_lading__containers",
+            "transit_documents",
+            "transit_advance",
+        ),
         purchase_number__iexact=purchase_number.strip(),
     )
     return _purchase_to_detail_schema(purchase, request)
@@ -3468,6 +4578,18 @@ _PURCHASE_STAGE_LABELS = {
     "cancelled": "Cancelled",
 }
 _PURCHASE_ALLOWED_STAGES = tuple(_PURCHASE_STAGE_LABELS.keys())
+
+# The forward-only path a transitor walks, one admin-approved step at a time.
+_TRANSITOR_NEXT_STAGE = {
+    None: "ecd_im8",
+    "ecd_im8": "transit_permit",
+    "transit_permit": "closure_guarantee",
+}
+
+
+def _transitor_next_stage(current_stage) -> Optional[str]:
+    """The stage a transitor may advance to from *current_stage*, or None."""
+    return _TRANSITOR_NEXT_STAGE.get(current_stage)
 
 
 def _purchase_stage_label(stage):
@@ -3521,6 +4643,23 @@ def _purchase_to_detail_schema(purchase, request=None):
         assigned_transitor_id=purchase.assigned_transitor_id,
         assigned_transitor=purchase.assigned_transitor.username if purchase.assigned_transitor else None,
         stage_label=_purchase_stage_label(purchase.stage),
+        bill_of_lading=(
+            _bl_to_schema(bl)
+            if (bl := _purchase_bill_of_lading(purchase)) is not None
+            else None
+        ),
+        transit_documents=(
+            [
+                _transit_document_to_schema(document)
+                for document in purchase.transit_documents.all()
+            ]
+            if not _transit_documents_locked_for(
+                getattr(request, "user", None) if request is not None else None,
+                purchase,
+            )
+            else []
+        ),
+        advance=_transit_advance_to_schema(_purchase_transit_advance(purchase)),
         items=[
             PurchaseItemSchema(
                 item_id=i.item_id,
@@ -3641,7 +4780,11 @@ def update_purchase_status(request, purchase_number: str, payload: PurchaseStatu
 @router.get("/purchases", response=List[PurchaseDetailSchema], auth=JWTAuth())
 def list_purchases(request):
     # Sort newest purchases first by purchase/order number (descending).
-    purchases = Purchase.objects.prefetch_related("items").order_by("-purchase_number")
+    purchases = (
+        Purchase.objects.select_related("bill_of_lading")
+        .prefetch_related("items", "bill_of_lading__containers", "transit_documents")
+        .order_by("-purchase_number")
+    )
     result: list[PurchaseDetailSchema] = []
     for p in purchases:
         result.append(_purchase_to_detail_schema(p, request))
