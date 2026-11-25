@@ -666,6 +666,26 @@ class PurchaseCheckpointTests(TestCase):
         self.assertEqual(data["stage_label"], "Done")
         self.assertEqual(data["stage_updated_by"], "pc_sales")
 
+class QuotationNumberTests(TestCase):
+    def test_next_number_starts_at_0001_and_increments(self):
+        from inventory.api import _next_quotation_number
+        from inventory.models import Quotation
+
+        self.assertEqual(_next_quotation_number(), "QUO-0001")
+        Quotation.objects.create(
+            quotation_number="QUO-0001",
+            date=date.today(),
+            customer_name="KATI ONE MEMBER PLC",
+        )
+        self.assertEqual(_next_quotation_number(), "QUO-0002")
+        Quotation.objects.create(
+            quotation_number="QUO-0010",
+            date=date.today(),
+            customer_name="Other Customer",
+        )
+        self.assertEqual(_next_quotation_number(), "QUO-0011")
+
+
 class StockAdjustmentTests(TestCase):
     def setUp(self):
         import json
@@ -687,6 +707,7 @@ class StockAdjustmentTests(TestCase):
 
         self.admin = make_user("sa_admin", "admin")
         self.store = make_user("sa_store", "store")
+
 
         grn = GRN.objects.create(
             supplier_name="Supplier",
